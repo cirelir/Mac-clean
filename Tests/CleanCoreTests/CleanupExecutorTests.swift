@@ -27,7 +27,10 @@ import Testing
     let result = await fixture.executor.execute(plan)
 
     #expect(result.items == [
-        CleanupItemResult(candidateID: fixture.candidate.id, status: .success(reclaimedBytes: 5))
+        CleanupItemResult(
+            candidateID: fixture.candidate.id,
+            status: .success(estimatedDeletedBytes: 5)
+        )
     ])
     var isDirectory: ObjCBool = false
     #expect(FileManager.default.fileExists(atPath: fixture.target.path, isDirectory: &isDirectory))
@@ -48,7 +51,7 @@ import Testing
 
     let result = await fixture.executor.execute(plan)
 
-    #expect(result.items.first?.status == .success(reclaimedBytes: 1))
+    #expect(result.items.first?.status == .success(estimatedDeletedBytes: 1))
     #expect(FileManager.default.fileExists(atPath: sentinel.path))
     #expect(try Data(contentsOf: sentinel) == Data([0x53, 0x41, 0x46, 0x45]))
     #expect(try FileManager.default.contentsOfDirectory(atPath: fixture.target.path).isEmpty)
@@ -153,11 +156,196 @@ import Testing
     }
     #expect(result.items[1] == CleanupItemResult(
         candidateID: successfulCandidate.id,
-        status: .success(reclaimedBytes: 2)
+        status: .success(estimatedDeletedBytes: 2)
     ))
     #expect(FileManager.default.fileExists(atPath: invalidTarget.path))
     #expect(try FileManager.default.contentsOfDirectory(atPath: validTarget.path).isEmpty)
     #expect(FileManager.default.fileExists(atPath: untouchedTarget.appending(path: "sentinel.bin").path))
+}
+
+@Test func executorStaysBoundToOpenedRootAfterPostFingerprintPathSwap() async throws {
+    let base = try makeTemporaryDirectory()
+    defer { try? FileManager.default.removeItem(at: base) }
+    let allowedRoot = base.appending(path: "allowed")
+    let target = allowedRoot.appending(path: "com.example.Editor")
+    let openedObject = allowedRoot.appending(path: "opened-original")
+    let outside = base.appending(path: "outside")
+    let outsideSentinel = outside.appending(path: "must-remain.bin")
+    try FileManager.default.createDirectory(at: target, withIntermediateDirectories: true)
+    try FileManager.default.createDirectory(at: outside, withIntermediateDirectories: true)
+    try Data([0x41, 0x42, 0x43]).write(to: target.appending(path: "cache.bin"))
+    try Data([0x53, 0x41, 0x46, 0x45]).write(to: outsideSentinel)
+    let fingerprinter = SystemFileFingerprinter()
+    let candidate = CoreTestFixtures.candidate(
+        risk: .green,
+        path: target.path,
+        fingerprint: try fingerprinter.fingerprint(at: target)
+    )
+    let hooks = CleanupExecutionHooks(
+        afterRootOpenedAndFingerprinted: { _ in
+            try FileManager.default.moveItem(at: target, to: openedObject)
+            try FileManager.default.createSymbolicLink(at: target, withDestinationURL: outside)
+        }
+    )
+    let executor = CleanupExecutor(
+        validator: SafePathValidator(allowedRoots: [allowedRoot], forbiddenExactPaths: []),
+        fingerprinter: fingerprinter,
+        fileManager: .default,
+        hooks: hooks
+    )
+
+    let result = await executor.execute(
+        CleanupPlanner().plan(candidates: [candidate], confirmedIDs: [])
+    )
+
+    #expect(result.items.first?.status == .success(estimatedDeletedBytes: 3))
+    #expect(try target.resourceValues(forKeys: [.isSymbolicLinkKey]).isSymbolicLink == true)
+    #expect(try Data(contentsOf: outsideSentinel) == Data([0x53, 0x41, 0x46, 0x45]))
+    #expect(try FileManager.default.contentsOfDirectory(atPath: openedObject.path).isEmpty)
+}
+
+@Test func executorRejectsFinalSymlinkAliasPlanBeforeOpeningTarget() async throws {
+    let root = try makeTemporaryDirectory()
+    defer { try? FileManager.default.removeItem(at: root) }
+    let actual = root.appending(path: "actual-cache")
+    let alias = root.appending(path: "cache-alias")
+    let payload = actual.appending(path: "must-remain.bin")
+    try FileManager.default.createDirectory(at: actual, withIntermediateDirectories: true)
+    try Data([0x41]).write(to: payload)
+    try FileManager.default.createSymbolicLink(at: alias, withDestinationURL: actual)
+    let fingerprinter = SystemFileFingerprinter()
+    let item = CleanupPlanItem(
+        candidateID: UUID(),
+        canonicalURL: alias,
+        expectedFingerprint: try fingerprinter.fingerprint(at: actual),
+        action: .deleteContentsPreservingRoot
+    )
+    let plan = CleanupPlan(id: UUID(), createdAt: .now, items: [item])
+    let executor = CleanupExecutor(
+        validator: SafePathValidator(allowedRoots: [root], forbiddenExactPaths: []),
+        fingerprinter: fingerprinter,
+        fileManager: .default
+    )
+
+    let result = await executor.execute(plan)
+
+    #expect(result.items.first?.status == .skipped(.pathRejected))
+    #expect(try Data(contentsOf: payload) == Data([0x41]))
+    #expect(try alias.resourceValues(forKeys: [.isSymbolicLinkKey]).isSymbolicLink == true)
+}
+
+@Test func executorReportsPartialProgressWhenLaterChildDeletionFails() async throws {
+    let root = try makeTemporaryDirectory()
+    defer { try? FileManager.default.removeItem(at: root) }
+    let target = root.appending(path: "com.example.Editor")
+    let first = target.appending(path: "a-first.bin")
+    let failing = target.appending(path: "b-fail.bin")
+    try FileManager.default.createDirectory(at: target, withIntermediateDirectories: true)
+    try Data([0x41]).write(to: first)
+    try Data([0x42, 0x43]).write(to: failing)
+    let fingerprinter = SystemFileFingerprinter()
+    let candidate = CoreTestFixtures.candidate(
+        risk: .green,
+        path: target.path,
+        fingerprint: try fingerprinter.fingerprint(at: target)
+    )
+    let hooks = CleanupExecutionHooks(
+        beforeRemovingEntry: { relativePath in
+            if relativePath == "b-fail.bin" {
+                throw InjectedCleanupFailure()
+            }
+        }
+    )
+    let executor = CleanupExecutor(
+        validator: SafePathValidator(allowedRoots: [root], forbiddenExactPaths: []),
+        fingerprinter: fingerprinter,
+        fileManager: .default,
+        hooks: hooks
+    )
+
+    let result = await executor.execute(
+        CleanupPlanner().plan(candidates: [candidate], confirmedIDs: [])
+    )
+
+    if case .partial(let estimatedDeletedBytes, _) = result.items.first?.status {
+        #expect(estimatedDeletedBytes == 1)
+    } else {
+        Issue.record("Expected partial status after one successful child deletion")
+    }
+    #expect(!FileManager.default.fileExists(atPath: first.path))
+    #expect(FileManager.default.fileExists(atPath: failing.path))
+    #expect(FileManager.default.fileExists(atPath: target.path))
+}
+
+@Test func concurrentExecuteCallsNeverOverlapTheSamePlan() async throws {
+    let root = try makeTemporaryDirectory()
+    defer { try? FileManager.default.removeItem(at: root) }
+    let target = root.appending(path: "com.example.Editor")
+    try FileManager.default.createDirectory(at: target, withIntermediateDirectories: true)
+    try Data([0x41]).write(to: target.appending(path: "cache.bin"))
+    let fingerprinter = SystemFileFingerprinter()
+    let candidate = CoreTestFixtures.candidate(
+        risk: .green,
+        path: target.path,
+        fingerprint: try fingerprinter.fingerprint(at: target)
+    )
+    let plan = CleanupPlanner().plan(candidates: [candidate], confirmedIDs: [])
+    let overlapProbe = PlanExecutionOverlapProbe()
+    let hooks = CleanupExecutionHooks(
+        beforePlanExecution: { await overlapProbe.enter() },
+        executionDidQueue: { await overlapProbe.releaseBlockedExecution() }
+    )
+    let executor = CleanupExecutor(
+        validator: SafePathValidator(allowedRoots: [root], forbiddenExactPaths: []),
+        fingerprinter: fingerprinter,
+        fileManager: .default,
+        hooks: hooks
+    )
+
+    async let firstResult = executor.execute(plan)
+    async let secondResult = executor.execute(plan)
+    let results = await [firstResult, secondResult]
+
+    #expect(await overlapProbe.maximumActiveExecutions() == 1)
+    #expect(results.allSatisfy { $0.planID == plan.id && $0.items.count == 1 })
+    #expect(FileManager.default.fileExists(atPath: target.path))
+    #expect(try FileManager.default.contentsOfDirectory(atPath: target.path).isEmpty)
+}
+
+private struct InjectedCleanupFailure: Error {}
+
+private actor PlanExecutionOverlapProbe {
+    private var activeExecutions = 0
+    private var maximumExecutions = 0
+    private var shouldBlockFirstExecution = true
+    private var blockedContinuation: CheckedContinuation<Void, Never>?
+
+    func enter() async {
+        activeExecutions += 1
+        maximumExecutions = max(maximumExecutions, activeExecutions)
+
+        if shouldBlockFirstExecution && activeExecutions == 1 {
+            await withCheckedContinuation { continuation in
+                blockedContinuation = continuation
+            }
+        } else if shouldBlockFirstExecution && activeExecutions == 2 {
+            shouldBlockFirstExecution = false
+            blockedContinuation?.resume()
+            blockedContinuation = nil
+        }
+
+        activeExecutions -= 1
+    }
+
+    func releaseBlockedExecution() {
+        shouldBlockFirstExecution = false
+        blockedContinuation?.resume()
+        blockedContinuation = nil
+    }
+
+    func maximumActiveExecutions() -> Int {
+        maximumExecutions
+    }
 }
 
 private final class CleanupFixture {

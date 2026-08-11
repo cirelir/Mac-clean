@@ -11,9 +11,29 @@ public enum CleanupSkipReason: String, Hashable, Codable, Sendable {
 }
 
 public enum CleanupItemStatus: Hashable, Sendable {
-    case success(reclaimedBytes: UInt64)
+    case success(estimatedDeletedBytes: UInt64)
+    case partial(estimatedDeletedBytes: UInt64, message: String)
     case skipped(CleanupSkipReason)
     case failed(message: String)
+}
+
+struct CleanupExecutionHooks: Sendable {
+    let beforePlanExecution: (@Sendable () async -> Void)?
+    let executionDidQueue: (@Sendable () async -> Void)?
+    let afterRootOpenedAndFingerprinted: (@Sendable (CleanupPlanItem) throws -> Void)?
+    let beforeRemovingEntry: (@Sendable (String) throws -> Void)?
+
+    init(
+        beforePlanExecution: (@Sendable () async -> Void)? = nil,
+        executionDidQueue: (@Sendable () async -> Void)? = nil,
+        afterRootOpenedAndFingerprinted: (@Sendable (CleanupPlanItem) throws -> Void)? = nil,
+        beforeRemovingEntry: (@Sendable (String) throws -> Void)? = nil
+    ) {
+        self.beforePlanExecution = beforePlanExecution
+        self.executionDidQueue = executionDidQueue
+        self.afterRootOpenedAndFingerprinted = afterRootOpenedAndFingerprinted
+        self.beforeRemovingEntry = beforeRemovingEntry
+    }
 }
 
 public struct CleanupItemResult: Hashable, Sendable {
@@ -38,8 +58,9 @@ public struct CleanupResult: Hashable, Sendable {
 
 public actor CleanupExecutor: CleanupExecuting {
     private let validator: SafePathValidator
-    private let fingerprinter: any FileFingerprinting
-    private let fileManager: FileManager
+    private let hooks: CleanupExecutionHooks
+    private var executionInProgress = false
+    private var executionWaiters: [CheckedContinuation<Void, Never>] = []
 
     public init(
         validator: SafePathValidator,
@@ -47,22 +68,42 @@ public actor CleanupExecutor: CleanupExecuting {
         fileManager: FileManager = .default
     ) {
         self.validator = validator
-        self.fingerprinter = fingerprinter
-        self.fileManager = fileManager
+        hooks = CleanupExecutionHooks()
+        _ = fingerprinter
+        _ = fileManager
+    }
+
+    init(
+        validator: SafePathValidator,
+        fingerprinter: any FileFingerprinting,
+        fileManager: FileManager,
+        hooks: CleanupExecutionHooks
+    ) {
+        self.validator = validator
+        self.hooks = hooks
+        _ = fingerprinter
+        _ = fileManager
     }
 
     public func execute(_ plan: CleanupPlan) async -> CleanupResult {
+        await acquireExecutionSlot()
+        defer { releaseExecutionSlot() }
+
+        if let beforePlanExecution = hooks.beforePlanExecution {
+            await beforePlanExecution()
+        }
+
         var results: [CleanupItemResult] = []
         results.reserveCapacity(plan.items.count)
 
         for item in plan.items {
-            results.append(await execute(item))
+            results.append(execute(item))
         }
 
         return CleanupResult(planID: plan.id, items: results)
     }
 
-    private func execute(_ item: CleanupPlanItem) async -> CleanupItemResult {
+    private func execute(_ item: CleanupPlanItem) -> CleanupItemResult {
         let validatedPath: ValidatedPath
         do {
             validatedPath = try validator.validate(item.canonicalURL)
@@ -73,60 +114,61 @@ public actor CleanupExecutor: CleanupExecuting {
             )
         }
 
-        let freshFingerprint: FileFingerprint
-        do {
-            freshFingerprint = try fingerprinter.fingerprint(at: item.canonicalURL)
-        } catch {
+        let plannedURL = item.canonicalURL.standardizedFileURL
+        guard plannedURL.path == validatedPath.canonicalURL.path else {
             return CleanupItemResult(
                 candidateID: item.candidateID,
-                status: .skipped(.fingerprintChanged)
+                status: .skipped(.pathRejected)
             )
         }
 
-        guard freshFingerprint == item.expectedFingerprint else {
-            return CleanupItemResult(
-                candidateID: item.candidateID,
-                status: .skipped(.fingerprintChanged)
+        let outcome = DescriptorTreeCleaner(hooks: hooks).deleteContents(
+            at: validatedPath.canonicalURL,
+            expectedFingerprint: item.expectedFingerprint,
+            action: item.action,
+            item: item
+        )
+
+        let status: CleanupItemStatus
+        switch outcome {
+        case .success(let estimatedDeletedBytes):
+            status = .success(estimatedDeletedBytes: estimatedDeletedBytes)
+        case .partial(let estimatedDeletedBytes, let message):
+            status = .partial(
+                estimatedDeletedBytes: estimatedDeletedBytes,
+                message: message
             )
+        case .failed(let message):
+            status = .failed(message: message)
+        case .skipped(let reason):
+            status = .skipped(reason)
         }
 
-        guard item.action == .deleteContentsPreservingRoot else {
-            return CleanupItemResult(
-                candidateID: item.candidateID,
-                status: .skipped(.unsupportedAction)
-            )
+        return CleanupItemResult(candidateID: item.candidateID, status: status)
+    }
+
+    private func acquireExecutionSlot() async {
+        guard executionInProgress else {
+            executionInProgress = true
+            return
         }
 
-        do {
-            let children = try fileManager.contentsOfDirectory(
-                at: validatedPath.canonicalURL,
-                includingPropertiesForKeys: nil
-            )
-            var reclaimedBytes: UInt64 = 0
-
-            for child in children {
-                let childSize = try await DirectorySizer().size(of: child)
-                let (newTotal, overflow) = reclaimedBytes.addingReportingOverflow(childSize)
-                guard !overflow else {
-                    throw CleanupExecutionError.reclaimedSizeOverflow
+        await withCheckedContinuation { continuation in
+            executionWaiters.append(continuation)
+            if let executionDidQueue = hooks.executionDidQueue {
+                Task {
+                    await executionDidQueue()
                 }
-                try fileManager.removeItem(at: child)
-                reclaimedBytes = newTotal
             }
-
-            return CleanupItemResult(
-                candidateID: item.candidateID,
-                status: .success(reclaimedBytes: reclaimedBytes)
-            )
-        } catch {
-            return CleanupItemResult(
-                candidateID: item.candidateID,
-                status: .failed(message: String(describing: error))
-            )
         }
     }
-}
 
-private enum CleanupExecutionError: Error {
-    case reclaimedSizeOverflow
+    private func releaseExecutionSlot() {
+        guard !executionWaiters.isEmpty else {
+            executionInProgress = false
+            return
+        }
+
+        executionWaiters.removeFirst().resume()
+    }
 }
