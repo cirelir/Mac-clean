@@ -9,6 +9,47 @@ enum CoreTestFixtures {
         .init(deviceID: 1, fileID: 2, ownerID: 501, sizeBytes: size, modifiedAt: date)
     }
 
+    static func candidate(
+        risk: RiskLevel,
+        path: String = path.path,
+        fingerprint: FileFingerprint = fingerprint(),
+        action: CleanupAction? = nil,
+        id: UUID = UUID()
+    ) -> CleanupCandidate {
+        let url = URL(fileURLWithPath: path)
+        let defaultAction: CleanupAction
+        switch risk {
+        case .green:
+            defaultAction = .deleteContentsPreservingRoot
+        case .yellow:
+            defaultAction = .moveToTrash
+        case .red:
+            defaultAction = .reportOnly
+        }
+        let proposedAction = action ?? defaultAction
+
+        return CleanupCandidate(
+            id: id,
+            displayName: url.lastPathComponent,
+            category: risk == .red ? .reportOnly : .applicationCache,
+            sourceURL: url,
+            canonicalURL: url.standardizedFileURL.resolvingSymlinksInPath(),
+            sizeBytes: fingerprint.sizeBytes,
+            modifiedAt: fingerprint.modifiedAt,
+            fingerprint: fingerprint,
+            evidence: .init(
+                scannerID: "fixture",
+                ruleID: "fixture-rule",
+                ownerName: "Editor",
+                ownerBundleID: "com.example.Editor",
+                explanation: "Fixture evidence"
+            ),
+            risk: risk,
+            riskReason: "Fixture risk",
+            proposedAction: proposedAction
+        )
+    }
+
     static func discovery(
         kind: DiscoveryKind,
         ownerBundleID: String? = "com.example.Editor"
