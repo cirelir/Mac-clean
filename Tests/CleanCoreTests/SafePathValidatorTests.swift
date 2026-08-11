@@ -61,3 +61,77 @@ import Testing
         try validator.validate(sibling)
     }
 }
+
+@Test func rejectsForbiddenPathContainingDotDot() throws {
+    let root = FileManager.default.temporaryDirectory.appending(path: UUID().uuidString)
+    let intermediate = root.appending(path: "intermediate")
+    let target = root.appending(path: "forbidden")
+    try FileManager.default.createDirectory(at: intermediate, withIntermediateDirectories: true)
+    try Data().write(to: target)
+    defer { try? FileManager.default.removeItem(at: root) }
+
+    let noncanonicalForbidden = URL(
+        fileURLWithPath: intermediate.path + "/../forbidden"
+    )
+    let validator = SafePathValidator(
+        allowedRoots: [root],
+        forbiddenExactPaths: [noncanonicalForbidden]
+    )
+
+    #expect(throws: PathValidationError.forbiddenTarget) {
+        try validator.validate(target)
+    }
+}
+
+@Test func rejectsForbiddenPathThroughSymlinkAlias() throws {
+    let root = FileManager.default.temporaryDirectory.appending(path: UUID().uuidString)
+    let actualDirectory = root.appending(path: "actual")
+    let alias = root.appending(path: "alias")
+    let target = actualDirectory.appending(path: "forbidden")
+    try FileManager.default.createDirectory(at: actualDirectory, withIntermediateDirectories: true)
+    try Data().write(to: target)
+    try FileManager.default.createSymbolicLink(at: alias, withDestinationURL: actualDirectory)
+    defer { try? FileManager.default.removeItem(at: root) }
+
+    let validator = SafePathValidator(
+        allowedRoots: [root],
+        forbiddenExactPaths: [alias.appending(path: "forbidden")]
+    )
+
+    #expect(throws: PathValidationError.forbiddenTarget) {
+        try validator.validate(target)
+    }
+}
+
+@Test func rejectsMissingTarget() throws {
+    let root = FileManager.default.temporaryDirectory.appending(path: UUID().uuidString)
+    try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+    defer { try? FileManager.default.removeItem(at: root) }
+
+    let missing = root.appending(path: "missing")
+    let validator = SafePathValidator(allowedRoots: [root], forbiddenExactPaths: [])
+
+    #expect(throws: PathValidationError.missingTarget) {
+        try validator.validate(missing)
+    }
+}
+
+@Test func returnsCanonicalPathAndContainingRootForAllowedTarget() throws {
+    let root = FileManager.default.temporaryDirectory.appending(path: UUID().uuidString)
+    let directory = root.appending(path: "directory")
+    let target = directory.appending(path: "candidate")
+    try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+    try Data().write(to: target)
+    defer { try? FileManager.default.removeItem(at: root) }
+
+    let noncanonicalTarget = URL(
+        fileURLWithPath: directory.path + "/../directory/candidate"
+    )
+    let validator = SafePathValidator(allowedRoots: [root], forbiddenExactPaths: [])
+
+    let validated = try validator.validate(noncanonicalTarget)
+
+    #expect(validated.originalURL == noncanonicalTarget)
+    #expect(validated.canonicalURL == target.standardizedFileURL.resolvingSymlinksInPath())
+    #expect(validated.allowedRoot == root.standardizedFileURL.resolvingSymlinksInPath())
+}

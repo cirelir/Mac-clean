@@ -19,7 +19,9 @@ public struct SafePathValidator: Sendable {
 
     public init(allowedRoots: [URL], forbiddenExactPaths: Set<URL>) {
         self.allowedRoots = allowedRoots
-        self.forbiddenExactPaths = forbiddenExactPaths
+        self.forbiddenExactPaths = Set(forbiddenExactPaths.map {
+            $0.standardizedFileURL.resolvingSymlinksInPath()
+        })
     }
 
     public func validate(_ url: URL) throws -> ValidatedPath {
