@@ -1,5 +1,6 @@
 import CleanCore
 import Foundation
+@testable import MacCleanUI
 
 enum UITestFixtures {
     static let timestamp = Date(timeIntervalSince1970: 1_700_000_000)
@@ -25,19 +26,46 @@ enum UITestFixtures {
     }
 
     static func candidate(sourceURL: URL, canonicalURL: URL) -> CleanupCandidate {
-        CleanupCandidate(
+        candidate(
+            risk: .green,
+            path: canonicalURL.path,
             id: candidateID,
+            sourceURL: sourceURL
+        )
+    }
+
+    static func candidate(
+        risk: RiskLevel,
+        path: String = "/tmp/mac-clean-tests/com.example.Editor",
+        id: UUID = UUID(),
+        sizeBytes: UInt64 = 1_024,
+        sourceURL: URL? = nil
+    ) -> CleanupCandidate {
+        let canonicalURL = URL(fileURLWithPath: path).standardizedFileURL
+        let sourceURL = sourceURL ?? canonicalURL
+        let action: CleanupAction
+        switch risk {
+        case .green:
+            action = .deleteContentsPreservingRoot
+        case .yellow:
+            action = .moveToTrash
+        case .red:
+            action = .reportOnly
+        }
+
+        return CleanupCandidate(
+            id: id,
             displayName: sourceURL.lastPathComponent,
-            category: .applicationCache,
+            category: risk == .red ? .reportOnly : .applicationCache,
             sourceURL: sourceURL,
             canonicalURL: canonicalURL,
-            sizeBytes: 1_024,
+            sizeBytes: sizeBytes,
             modifiedAt: timestamp,
             fingerprint: FileFingerprint(
                 deviceID: 1,
                 fileID: 2,
                 ownerID: 501,
-                sizeBytes: 1_024,
+                sizeBytes: sizeBytes,
                 modifiedAt: timestamp
             ),
             evidence: CandidateEvidence(
@@ -47,9 +75,189 @@ enum UITestFixtures {
                 ownerBundleID: "com.example.Editor",
                 explanation: "Fixture evidence"
             ),
-            risk: .green,
+            risk: risk,
             riskReason: "Fixture risk",
-            proposedAction: .deleteContentsPreservingRoot
+            proposedAction: action
+        )
+    }
+
+    static func scanReport(candidateCount: Int, failureCount: Int) -> ScanReport {
+        ScanReport(
+            candidates: (0..<candidateCount).map { index in
+                candidate(
+                    risk: .green,
+                    path: "/tmp/mac-clean-tests/candidate-\(index)",
+                    id: UUID()
+                )
+            },
+            failures: (0..<failureCount).map { index in
+                ScannerFailure(scannerID: "fixture-scanner-\(index)", message: "Fixture failure")
+            }
+        )
+    }
+}
+
+enum UITestFixtureError: Error, Sendable {
+    case inventoryUnavailable
+}
+
+struct StubInventoryProvider: ApplicationInventoryProviding {
+    let result: Result<ApplicationInventory, UITestFixtureError>
+
+    init(
+        inventory: ApplicationInventory = ApplicationInventory(
+            installedApplications: [],
+            runningBundleIDs: []
+        )
+    ) {
+        result = .success(inventory)
+    }
+
+    init(error: UITestFixtureError) {
+        result = .failure(error)
+    }
+
+    func inventory() async throws -> ApplicationInventory {
+        try result.get()
+    }
+}
+
+struct StubScanCoordinator: ScanCoordinating {
+    let report: ScanReport
+
+    init(report: ScanReport = UITestFixtures.scanReport(candidateCount: 0, failureCount: 0)) {
+        self.report = report
+    }
+
+    func scan(context: ScanContext) async -> ScanReport {
+        report
+    }
+}
+
+@MainActor
+final class RecordingScanCoordinator: ScanCoordinating {
+    private let reports: [ScanReport]
+    private(set) var contexts: [ScanContext] = []
+
+    init(reports: [ScanReport] = [UITestFixtures.scanReport(candidateCount: 0, failureCount: 0)]) {
+        self.reports = reports
+    }
+
+    var scanCount: Int { contexts.count }
+
+    func scan(context: ScanContext) async -> ScanReport {
+        contexts.append(context)
+        let index = min(contexts.count - 1, reports.count - 1)
+        return reports[index]
+    }
+}
+
+actor StubCleanupExecutor: CleanupExecuting {
+    private let resultItems: [CleanupItemResult]
+    private(set) var plans: [CleanupPlan] = []
+
+    init(resultItems: [CleanupItemResult] = []) {
+        self.resultItems = resultItems
+    }
+
+    func execute(_ plan: CleanupPlan) async -> CleanupResult {
+        plans.append(plan)
+        return CleanupResult(planID: plan.id, items: resultItems)
+    }
+}
+
+@MainActor
+final class InMemoryAuditStore: AuditStoring {
+    private(set) var appendedRecords: [AuditRecord] = []
+    private(set) var scanDates: [Date] = []
+
+    init(lastScan: Date? = nil) {
+        if let lastScan {
+            scanDates = [lastScan]
+        }
+    }
+
+    func append(_ record: AuditRecord) throws {
+        appendedRecords.append(record)
+    }
+
+    func recordScan(at date: Date) throws {
+        scanDates.append(date)
+    }
+
+    func records() throws -> [AuditRecord] {
+        appendedRecords
+    }
+
+    func latestScanDate() throws -> Date? {
+        scanDates.max()
+    }
+
+    func clear() throws {
+        appendedRecords.removeAll()
+        scanDates.removeAll()
+    }
+}
+
+@MainActor
+final class RecordingFinderRevealer: FinderRevealing {
+    private(set) var urls: [URL] = []
+
+    func reveal(_ urls: [URL]) {
+        self.urls.append(contentsOf: urls)
+    }
+}
+
+actor RecordingNotificationService: NotificationSending {
+    struct Summary: Equatable, Sendable {
+        let estimatedDeletedBytes: UInt64
+        let pendingReviewCount: Int
+    }
+
+    private(set) var authorizationRequestCount = 0
+    private(set) var summaries: [Summary] = []
+    var authorizationResult = true
+
+    func requestAuthorizationIfNeeded() async -> Bool {
+        authorizationRequestCount += 1
+        return authorizationResult
+    }
+
+    func sendCleanupSummary(
+        estimatedDeletedBytes: UInt64,
+        pendingReviewCount: Int
+    ) async {
+        summaries.append(
+            Summary(
+                estimatedDeletedBytes: estimatedDeletedBytes,
+                pendingReviewCount: pendingReviewCount
+            )
+        )
+    }
+}
+
+@MainActor
+extension AppDependencies {
+    static func fixture(
+        report: ScanReport = UITestFixtures.scanReport(candidateCount: 0, failureCount: 0),
+        lastScan: Date? = nil,
+        now: @escaping @Sendable () -> Date = { UITestFixtures.timestamp },
+        inventory: (any ApplicationInventoryProviding)? = nil,
+        coordinator: (any ScanCoordinating)? = nil,
+        cleanupExecutor: (any CleanupExecuting)? = nil,
+        audit: (any AuditStoring)? = nil,
+        finder: (any FinderRevealing)? = nil,
+        notifications: (any NotificationSending)? = nil
+    ) -> AppDependencies {
+        AppDependencies(
+            inventory: inventory ?? StubInventoryProvider(),
+            coordinator: coordinator ?? StubScanCoordinator(report: report),
+            planner: CleanupPlanner(),
+            cleanupExecutor: cleanupExecutor ?? StubCleanupExecutor(),
+            audit: audit ?? InMemoryAuditStore(lastScan: lastScan),
+            finder: finder ?? RecordingFinderRevealer(),
+            notifications: notifications ?? RecordingNotificationService(),
+            now: now
         )
     }
 }
