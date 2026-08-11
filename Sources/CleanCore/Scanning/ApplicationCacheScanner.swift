@@ -1,5 +1,9 @@
 import Foundation
 
+enum ApplicationCacheScannerError: Error, Equatable {
+    case identityChanged(URL)
+}
+
 public struct ApplicationCacheScanner: Scanner, Sendable {
     public let id: String
     public let cacheRoot: URL
@@ -22,8 +26,9 @@ public struct ApplicationCacheScanner: Scanner, Sendable {
     }
 
     public func scan(context: ScanContext) async throws -> [DiscoveredItem] {
+        let pinnedCacheRoot = try validator.pinnedAllowedRoot(for: cacheRoot)
         let children = try FileManager.default.contentsOfDirectory(
-            at: cacheRoot,
+            at: pinnedCacheRoot,
             includingPropertiesForKeys: nil
         ).sorted { $0.lastPathComponent < $1.lastPathComponent }
         let applicationsByBundleID = Dictionary(
@@ -39,11 +44,26 @@ public struct ApplicationCacheScanner: Scanner, Sendable {
             let validatedPath = try validator.validate(child)
             let fingerprint = try fingerprinter.fingerprint(at: validatedPath.canonicalURL)
             let size = try await directorySizer.size(of: validatedPath.canonicalURL)
-            let values = try child.resourceValues(forKeys: [.isDirectoryKey, .isSymbolicLinkKey])
-            let isCacheDirectory = values.isDirectory == true && values.isSymbolicLink != true
+            let values = try validatedPath.canonicalURL.resourceValues(
+                forKeys: [.isDirectoryKey, .isSymbolicLinkKey]
+            )
+            let isCanonicalChild = child.standardizedFileURL.path
+                == validatedPath.canonicalURL.path
+            let isCacheDirectory = isCanonicalChild
+                && values.isDirectory == true
+                && values.isSymbolicLink != true
             let application = isCacheDirectory
                 ? applicationsByBundleID[child.lastPathComponent]
                 : nil
+            let candidateEvidence = evidence(for: application)
+            let finalFingerprint = try fingerprinter.fingerprint(
+                at: validatedPath.canonicalURL
+            )
+            guard finalFingerprint == fingerprint else {
+                throw ApplicationCacheScannerError.identityChanged(
+                    validatedPath.canonicalURL
+                )
+            }
 
             discoveries.append(
                 DiscoveredItem(
@@ -53,7 +73,7 @@ public struct ApplicationCacheScanner: Scanner, Sendable {
                     sizeBytes: size,
                     modifiedAt: fingerprint.modifiedAt,
                     fingerprint: fingerprint,
-                    evidence: evidence(for: application),
+                    evidence: candidateEvidence,
                     kind: application == nil ? .unknown : .regenerableApplicationCache
                 )
             )

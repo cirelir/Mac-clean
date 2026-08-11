@@ -23,14 +23,14 @@ import Testing
     #expect(FinderRevealState(url: url, fileManager: fileManager) == .unavailable(.inaccessible))
 }
 
-@Test func candidateFinderStateUsesOriginalSourceURL() throws {
-    let sourceURL = FileManager.default.temporaryDirectory.appending(path: UUID().uuidString)
-    let canonicalURL = URL(fileURLWithPath: "/canonical/path/that/does/not/exist")
-    try Data().write(to: sourceURL)
-    defer { try? FileManager.default.removeItem(at: sourceURL) }
+@Test func candidateFinderStateUsesCanonicalURL() throws {
+    let sourceURL = URL(fileURLWithPath: "/source/path/that/does/not/exist")
+    let canonicalURL = FileManager.default.temporaryDirectory.appending(path: UUID().uuidString)
+    try Data().write(to: canonicalURL)
+    defer { try? FileManager.default.removeItem(at: canonicalURL) }
     let candidate = UITestFixtures.candidate(sourceURL: sourceURL, canonicalURL: canonicalURL)
 
-    #expect(FinderRevealState(candidate: candidate, fileManager: .default) == .available(sourceURL))
+    #expect(FinderRevealState(candidate: candidate, fileManager: .default) == .available(canonicalURL))
 }
 
 private final class InaccessibleFileManager: FileManager, @unchecked Sendable {

@@ -14,28 +14,53 @@ public protocol AuditStoring: AnyObject {
 @MainActor
 public final class SwiftDataAuditStore: AuditStoring {
     private let context: ModelContext
+    private let beforeSave: (() throws -> Void)?
 
     public init() throws {
         let container = try Self.makeContainer(isStoredInMemoryOnly: false)
         context = ModelContext(container)
+        beforeSave = nil
     }
 
-    private init(container: ModelContainer) {
+    private init(
+        container: ModelContainer,
+        beforeSave: (() throws -> Void)? = nil
+    ) {
         context = ModelContext(container)
+        self.beforeSave = beforeSave
     }
 
     public static func inMemory() throws -> SwiftDataAuditStore {
         try SwiftDataAuditStore(container: makeContainer(isStoredInMemoryOnly: true))
     }
 
+    static func inMemory(
+        beforeSave: @escaping () throws -> Void
+    ) throws -> SwiftDataAuditStore {
+        try SwiftDataAuditStore(
+            container: makeContainer(isStoredInMemoryOnly: true),
+            beforeSave: beforeSave
+        )
+    }
+
     public func append(_ record: AuditRecord) throws {
         context.insert(AuditEntry(record: record))
-        try context.save()
+        do {
+            try save()
+        } catch {
+            context.rollback()
+            throw error
+        }
     }
 
     public func recordScan(at date: Date) throws {
         context.insert(ScanEntry(timestamp: date))
-        try context.save()
+        do {
+            try save()
+        } catch {
+            context.rollback()
+            throw error
+        }
     }
 
     public func records() throws -> [AuditRecord] {
@@ -57,12 +82,22 @@ public final class SwiftDataAuditStore: AuditStoring {
     }
 
     public func clear() throws {
-        for entry in try context.fetch(FetchDescriptor<AuditEntry>()) {
-            context.delete(entry)
+        do {
+            for entry in try context.fetch(FetchDescriptor<AuditEntry>()) {
+                context.delete(entry)
+            }
+            for entry in try context.fetch(FetchDescriptor<ScanEntry>()) {
+                context.delete(entry)
+            }
+            try save()
+        } catch {
+            context.rollback()
+            throw error
         }
-        for entry in try context.fetch(FetchDescriptor<ScanEntry>()) {
-            context.delete(entry)
-        }
+    }
+
+    private func save() throws {
+        try beforeSave?()
         try context.save()
     }
 

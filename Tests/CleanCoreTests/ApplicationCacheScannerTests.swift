@@ -61,6 +61,29 @@ import Testing
     #expect(discoveries[0].evidence.ownerBundleID == nil)
 }
 
+@Test func cacheScannerReportsDirectChildAliasAsUnknownEvenWhenItsNameMatchesABundle() async throws {
+    let fixture = try CacheFixture(entries: ["victim-cache": 64])
+    let alias = fixture.root.appending(path: "com.example.Editor")
+    let victim = fixture.root.appending(path: "victim-cache")
+    try FileManager.default.createSymbolicLink(at: alias, withDestinationURL: victim)
+    let scanner = ApplicationCacheScanner(
+        cacheRoot: fixture.root,
+        validator: fixture.validator,
+        fingerprinter: SystemFileFingerprinter()
+    )
+
+    let discoveries = try await scanner.scan(
+        context: fixture.context(installed: ["com.example.Editor"])
+    )
+    let aliasDiscovery = try #require(
+        discoveries.first { $0.sourceURL.lastPathComponent == "com.example.Editor" }
+    )
+
+    #expect(aliasDiscovery.sourceURL.standardizedFileURL.path != aliasDiscovery.validatedPath.canonicalURL.path)
+    #expect(aliasDiscovery.kind == .unknown)
+    #expect(aliasDiscovery.evidence.ownerBundleID == nil)
+}
+
 @Test func directorySizerCountsRegularFilesWithoutFollowingSymbolicLinks() async throws {
     let fixture = try CacheFixture(entries: ["com.example.Editor": 256])
     let cache = fixture.root.appending(path: "com.example.Editor")
@@ -117,6 +140,78 @@ import Testing
         )
     } catch {
         Issue.record("Expected cannotEnumerate, got \(error)")
+    }
+}
+
+@Test func cacheScannerRejectsConfiguredRootReplacedByOutsideSymlinkBeforeDiscovery() async throws {
+    let base = FileManager.default.temporaryDirectory.appending(path: UUID().uuidString)
+    let configuredRoot = base.appending(path: "allowed")
+    let movedRoot = base.appending(path: "allowed-original")
+    let outside = base.appending(path: "outside")
+    let victim = outside.appending(path: "com.example.Editor")
+    let sentinel = victim.appending(path: "must-remain.bin")
+    try FileManager.default.createDirectory(at: configuredRoot, withIntermediateDirectories: true)
+    try FileManager.default.createDirectory(at: victim, withIntermediateDirectories: true)
+    try Data([0x53, 0x41, 0x46, 0x45]).write(to: sentinel)
+    defer { try? FileManager.default.removeItem(at: base) }
+    let validator = SafePathValidator(allowedRoots: [configuredRoot], forbiddenExactPaths: [])
+    let scanner = ApplicationCacheScanner(
+        cacheRoot: configuredRoot,
+        validator: validator,
+        fingerprinter: SystemFileFingerprinter()
+    )
+
+    try FileManager.default.moveItem(at: configuredRoot, to: movedRoot)
+    try FileManager.default.createSymbolicLink(at: configuredRoot, withDestinationURL: outside)
+
+    do {
+        let discoveries = try await scanner.scan(
+            context: CoreTestFixtures.context(installed: ["com.example.Editor"])
+        )
+        Issue.record("Expected replaced cache root to fail, discovered \(discoveries.count) items")
+    } catch PathValidationError.outsideAllowedRoots {
+        // Expected.
+    } catch {
+        Issue.record("Expected outsideAllowedRoots, got \(error)")
+    }
+    #expect(try Data(contentsOf: sentinel) == Data([0x53, 0x41, 0x46, 0x45]))
+}
+
+@Test func cacheScannerRejectsCanonicalObjectReplacedDuringSizing() async throws {
+    let fixture = try CacheFixture(entries: ["com.example.Editor": 64])
+    let target = fixture.root.appending(path: "com.example.Editor")
+    let movedTarget = fixture.root.appending(path: "original-cache")
+    let scanner = ApplicationCacheScanner(
+        cacheRoot: fixture.root,
+        validator: fixture.validator,
+        fingerprinter: SystemFileFingerprinter(),
+        directorySizer: CanonicalObjectReplacingSizer(
+            target: target,
+            movedTarget: movedTarget
+        )
+    )
+
+    do {
+        let discoveries = try await scanner.scan(
+            context: fixture.context(installed: ["com.example.Editor"])
+        )
+        Issue.record("Expected changed canonical object to fail, discovered \(discoveries.count) items")
+    } catch ApplicationCacheScannerError.identityChanged(let changedURL) {
+        #expect(changedURL == target.standardizedFileURL)
+    } catch {
+        Issue.record("Expected identityChanged, got \(error)")
+    }
+}
+
+private struct CanonicalObjectReplacingSizer: DirectorySizing {
+    let target: URL
+    let movedTarget: URL
+
+    func size(of url: URL) async throws -> UInt64 {
+        try FileManager.default.moveItem(at: target, to: movedTarget)
+        try FileManager.default.createDirectory(at: target, withIntermediateDirectories: false)
+        try Data(repeating: 0x56, count: 4_096).write(to: target.appending(path: "victim.bin"))
+        return 4_096
     }
 }
 

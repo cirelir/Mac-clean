@@ -135,3 +135,47 @@ import Testing
     #expect(validated.canonicalURL == target.standardizedFileURL.resolvingSymlinksInPath())
     #expect(validated.allowedRoot == root.standardizedFileURL.resolvingSymlinksInPath())
 }
+
+@Test func rejectsAllowedRootWhoseFinalComponentIsInitiallyASymlink() throws {
+    let base = FileManager.default.temporaryDirectory.appending(path: UUID().uuidString)
+    let outside = base.appending(path: "outside")
+    let configuredRoot = base.appending(path: "allowed-link")
+    let outsideTarget = outside.appending(path: "com.example.Editor")
+    try FileManager.default.createDirectory(at: outsideTarget, withIntermediateDirectories: true)
+    try FileManager.default.createSymbolicLink(
+        at: configuredRoot,
+        withDestinationURL: outside
+    )
+    defer { try? FileManager.default.removeItem(at: base) }
+
+    let validator = SafePathValidator(
+        allowedRoots: [configuredRoot],
+        forbiddenExactPaths: []
+    )
+
+    #expect(throws: PathValidationError.outsideAllowedRoots) {
+        try validator.validate(configuredRoot.appending(path: "com.example.Editor"))
+    }
+}
+
+@Test func rejectsTargetAfterPinnedAllowedRootIsReplacedByOutsideSymlink() throws {
+    let base = FileManager.default.temporaryDirectory.appending(path: UUID().uuidString)
+    let configuredRoot = base.appending(path: "allowed")
+    let movedRoot = base.appending(path: "allowed-original")
+    let outside = base.appending(path: "outside")
+    let outsideTarget = outside.appending(path: "com.example.Editor")
+    try FileManager.default.createDirectory(at: configuredRoot, withIntermediateDirectories: true)
+    try FileManager.default.createDirectory(at: outsideTarget, withIntermediateDirectories: true)
+    defer { try? FileManager.default.removeItem(at: base) }
+    let validator = SafePathValidator(
+        allowedRoots: [configuredRoot],
+        forbiddenExactPaths: []
+    )
+
+    try FileManager.default.moveItem(at: configuredRoot, to: movedRoot)
+    try FileManager.default.createSymbolicLink(at: configuredRoot, withDestinationURL: outside)
+
+    #expect(throws: PathValidationError.outsideAllowedRoots) {
+        try validator.validate(configuredRoot.appending(path: "com.example.Editor"))
+    }
+}

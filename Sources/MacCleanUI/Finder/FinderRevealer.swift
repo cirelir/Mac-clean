@@ -36,6 +36,6 @@ public enum FinderRevealState: Equatable, Sendable {
     }
 
     public init(candidate: CleanupCandidate, fileManager: FileManager = .default) {
-        self.init(url: candidate.sourceURL, fileManager: fileManager)
+        self.init(url: candidate.canonicalURL, fileManager: fileManager)
     }
 }

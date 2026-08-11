@@ -234,6 +234,40 @@ import Testing
     #expect(try alias.resourceValues(forKeys: [.isSymbolicLinkKey]).isSymbolicLink == true)
 }
 
+@Test func executorRejectsOutsideTargetAfterPinnedAllowedRootIsReplacedBySymlink() async throws {
+    let base = try makeTemporaryDirectory()
+    defer { try? FileManager.default.removeItem(at: base) }
+    let outside = base.appending(path: "outside")
+    let configuredRoot = base.appending(path: "allowed")
+    let movedRoot = base.appending(path: "allowed-original")
+    let victim = outside.appending(path: "com.example.Editor")
+    let sentinel = victim.appending(path: "must-remain.bin")
+    try FileManager.default.createDirectory(at: configuredRoot, withIntermediateDirectories: true)
+    try FileManager.default.createDirectory(at: victim, withIntermediateDirectories: true)
+    try Data([0x53, 0x41, 0x46, 0x45]).write(to: sentinel)
+    let fingerprinter = SystemFileFingerprinter()
+    let validator = SafePathValidator(allowedRoots: [configuredRoot], forbiddenExactPaths: [])
+    try FileManager.default.moveItem(at: configuredRoot, to: movedRoot)
+    try FileManager.default.createSymbolicLink(at: configuredRoot, withDestinationURL: outside)
+    let candidate = CoreTestFixtures.candidate(
+        risk: .green,
+        path: victim.path,
+        fingerprint: try fingerprinter.fingerprint(at: victim)
+    )
+    let executor = CleanupExecutor(
+        validator: validator,
+        fingerprinter: fingerprinter,
+        fileManager: .default
+    )
+
+    let result = await executor.execute(
+        CleanupPlanner().plan(candidates: [candidate], confirmedIDs: [])
+    )
+
+    #expect(result.items.first?.status == .skipped(.pathRejected))
+    #expect(try Data(contentsOf: sentinel) == Data([0x53, 0x41, 0x46, 0x45]))
+}
+
 @Test func executorReportsPartialProgressWhenLaterChildDeletionFails() async throws {
     let root = try makeTemporaryDirectory()
     defer { try? FileManager.default.removeItem(at: root) }
