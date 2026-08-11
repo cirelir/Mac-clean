@@ -58,6 +58,9 @@ public final class AppModel {
     @ObservationIgnored
     private var currentScanID: UUID?
 
+    @ObservationIgnored
+    private var scanGeneration: UInt64 = 0
+
     public init(dependencies: AppDependencies) {
         self.dependencies = dependencies
     }
@@ -85,29 +88,44 @@ public final class AppModel {
     }
 
     public func scan() async {
+        guard state.phase != .cleaning else { return }
+
+        scanGeneration &+= 1
+        let generation = scanGeneration
         state.phase = .scanning
+        state.candidates = []
+        state.failures = []
         state.errorMessage = nil
+        currentScanID = nil
 
         do {
             let inventory = try await dependencies.inventory.inventory()
+            guard generation == scanGeneration else { return }
             let report = await dependencies.coordinator.scan(
                 context: ScanContext(inventory: inventory, now: dependencies.now())
             )
-            state.candidates = report.candidates
-            state.failures = report.failures
+            guard generation == scanGeneration else { return }
 
             let completedAt = dependencies.now()
+            try dependencies.audit.recordScan(at: completedAt)
+            state.candidates = report.candidates
+            state.failures = report.failures
             state.lastScan = completedAt
             currentScanID = UUID()
-            try dependencies.audit.recordScan(at: completedAt)
             state.phase = .results
         } catch {
+            guard generation == scanGeneration else { return }
+            state.candidates = []
+            state.failures = []
+            currentScanID = nil
             state.errorMessage = String(describing: error)
             state.phase = .idle
         }
     }
 
     public func cleanGreenCandidates() async {
+        guard state.phase == .results, let currentScanID else { return }
+
         let candidates = state.candidates
         let scanID = currentScanID
         state.phase = .cleaning
@@ -123,26 +141,45 @@ public final class AppModel {
         let candidatesByID = Dictionary(uniqueKeysWithValues: candidates.map { ($0.id, $0) })
         var auditErrors: [String] = []
 
-        for item in result.items {
-            guard let candidate = candidatesByID[item.candidateID] else {
-                auditErrors.append("Cleanup result references an unknown candidate")
-                continue
-            }
-
-            do {
-                try dependencies.audit.append(
-                    auditRecord(
-                        for: candidate,
-                        result: item,
-                        scanID: scanID ?? plan.id,
-                        timestamp: completedAt
+        if let mismatch = cleanupProtocolMismatch(plan: plan, result: result) {
+            auditErrors.append(mismatch)
+            for plannedItem in plan.items {
+                guard let candidate = candidatesByID[plannedItem.candidateID] else { continue }
+                do {
+                    try dependencies.audit.append(
+                        auditRecord(
+                            for: candidate,
+                            result: CleanupItemResult(
+                                candidateID: plannedItem.candidateID,
+                                status: .failed(message: mismatch)
+                            ),
+                            scanID: scanID,
+                            timestamp: completedAt
+                        )
                     )
-                )
-            } catch {
-                auditErrors.append(String(describing: error))
+                } catch {
+                    auditErrors.append(String(describing: error))
+                }
+            }
+        } else {
+            for item in result.items {
+                guard let candidate = candidatesByID[item.candidateID] else { continue }
+                do {
+                    try dependencies.audit.append(
+                        auditRecord(
+                            for: candidate,
+                            result: item,
+                            scanID: scanID,
+                            timestamp: completedAt
+                        )
+                    )
+                } catch {
+                    auditErrors.append(String(describing: error))
+                }
             }
         }
 
+        state.phase = .results
         await scan()
         if !auditErrors.isEmpty {
             state.errorMessage = auditErrors.joined(separator: "\n")
@@ -154,6 +191,30 @@ public final class AppModel {
             return
         }
         dependencies.finder.reveal([url])
+    }
+
+    private func cleanupProtocolMismatch(
+        plan: CleanupPlan,
+        result: CleanupResult
+    ) -> String? {
+        guard result.planID == plan.id else {
+            return "Cleanup executor protocol mismatch: result plan ID does not match the requested plan"
+        }
+
+        let plannedIDs = plan.items.map(\.candidateID)
+        let resultIDs = result.items.map(\.candidateID)
+        let uniquePlannedIDs = Set(plannedIDs)
+        let uniqueResultIDs = Set(resultIDs)
+        guard
+            uniquePlannedIDs.count == plannedIDs.count,
+            uniqueResultIDs.count == resultIDs.count,
+            resultIDs.count == plannedIDs.count,
+            uniqueResultIDs == uniquePlannedIDs
+        else {
+            return "Cleanup executor protocol mismatch: result candidates are not a one-to-one match for the requested plan"
+        }
+
+        return nil
     }
 
     private func auditRecord(

@@ -153,16 +153,114 @@ final class RecordingScanCoordinator: ScanCoordinating {
 }
 
 actor StubCleanupExecutor: CleanupExecuting {
-    private let resultItems: [CleanupItemResult]
+    private let result: @Sendable (CleanupPlan) -> CleanupResult
     private(set) var plans: [CleanupPlan] = []
 
     init(resultItems: [CleanupItemResult] = []) {
-        self.resultItems = resultItems
+        result = { plan in
+            CleanupResult(planID: plan.id, items: resultItems)
+        }
+    }
+
+    init(result: @escaping @Sendable (CleanupPlan) -> CleanupResult) {
+        self.result = result
     }
 
     func execute(_ plan: CleanupPlan) async -> CleanupResult {
         plans.append(plan)
-        return CleanupResult(planID: plan.id, items: resultItems)
+        return result(plan)
+    }
+}
+
+actor SequencedInventoryProvider: ApplicationInventoryProviding {
+    private let results: [Result<ApplicationInventory, UITestFixtureError>]
+    private var nextIndex = 0
+
+    init(results: [Result<ApplicationInventory, UITestFixtureError>]) {
+        precondition(!results.isEmpty)
+        self.results = results
+    }
+
+    func inventory() async throws -> ApplicationInventory {
+        let index = min(nextIndex, results.count - 1)
+        nextIndex += 1
+        return try results[index].get()
+    }
+}
+
+actor SuspendingFirstScanCoordinator: ScanCoordinating {
+    private let firstReport: ScanReport
+    private let laterReport: ScanReport
+    private var callCount = 0
+    private var firstContinuation: CheckedContinuation<ScanReport, Never>?
+    private var firstStartedWaiters: [CheckedContinuation<Void, Never>] = []
+
+    init(firstReport: ScanReport, laterReport: ScanReport) {
+        self.firstReport = firstReport
+        self.laterReport = laterReport
+    }
+
+    func scan(context: ScanContext) async -> ScanReport {
+        callCount += 1
+        guard callCount == 1 else {
+            return laterReport
+        }
+
+        let waiters = firstStartedWaiters
+        firstStartedWaiters.removeAll()
+        waiters.forEach { $0.resume() }
+        return await withCheckedContinuation { continuation in
+            firstContinuation = continuation
+        }
+    }
+
+    func waitUntilFirstScanStarts() async {
+        guard callCount == 0 else { return }
+        await withCheckedContinuation { continuation in
+            firstStartedWaiters.append(continuation)
+        }
+    }
+
+    func resumeFirstScan() {
+        firstContinuation?.resume(returning: firstReport)
+        firstContinuation = nil
+    }
+}
+
+actor SuspendingCleanupExecutor: CleanupExecuting {
+    private var continuation: CheckedContinuation<Void, Never>?
+    private var startedWaiters: [CheckedContinuation<Void, Never>] = []
+    private(set) var plans: [CleanupPlan] = []
+
+    func execute(_ plan: CleanupPlan) async -> CleanupResult {
+        plans.append(plan)
+        let waiters = startedWaiters
+        startedWaiters.removeAll()
+        waiters.forEach { $0.resume() }
+        await withCheckedContinuation { continuation in
+            self.continuation = continuation
+        }
+        return CleanupResult(
+            planID: plan.id,
+            items: plan.items.map {
+                CleanupItemResult(
+                    candidateID: $0.candidateID,
+                    status: .success(estimatedDeletedBytes: 0)
+                )
+            }
+        )
+    }
+
+    func waitUntilExecutionStarts() async {
+        guard plans.isEmpty else { return }
+        await withCheckedContinuation { continuation in
+            startedWaiters.append(continuation)
+        }
+    }
+
+    func resumeExecution() {
+        continuation?.resume()
+        continuation = nil
     }
 }
 

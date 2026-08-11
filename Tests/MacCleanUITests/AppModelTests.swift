@@ -41,6 +41,104 @@ import Testing
     #expect(model.state.errorMessage?.contains("inventoryUnavailable") == true)
 }
 
+@Test @MainActor func failedRescanInvalidatesThePreviousCleanupSnapshot() async {
+    let candidate = UITestFixtures.candidate(risk: .green)
+    let inventory = SequencedInventoryProvider(
+        results: [
+            .success(ApplicationInventory(installedApplications: [], runningBundleIDs: [])),
+            .failure(.inventoryUnavailable)
+        ]
+    )
+    let executor = StubCleanupExecutor()
+    let model = AppModel(
+        dependencies: .fixture(
+            report: ScanReport(candidates: [candidate], failures: []),
+            inventory: inventory,
+            cleanupExecutor: executor
+        )
+    )
+    await model.scan()
+
+    await model.scan()
+    await model.cleanGreenCandidates()
+
+    let plans = await executor.plans
+    #expect(model.state.phase == .idle)
+    #expect(model.state.candidates.isEmpty)
+    #expect(model.estimatedReclaimableBytes == 0)
+    #expect(plans.isEmpty)
+}
+
+@Test @MainActor func laterScanWinsWhenAnEarlierScanReturnsLast() async {
+    let stale = UITestFixtures.candidate(risk: .green, path: "/tmp/stale")
+    let latest = UITestFixtures.candidate(risk: .green, path: "/tmp/latest")
+    let coordinator = SuspendingFirstScanCoordinator(
+        firstReport: ScanReport(candidates: [stale], failures: []),
+        laterReport: ScanReport(candidates: [latest], failures: [])
+    )
+    let audit = InMemoryAuditStore()
+    let model = AppModel(
+        dependencies: .fixture(coordinator: coordinator, audit: audit)
+    )
+
+    let earlierScan = Task { await model.scan() }
+    await coordinator.waitUntilFirstScanStarts()
+    await model.scan()
+    await coordinator.resumeFirstScan()
+    await earlierScan.value
+
+    #expect(model.state.candidates.map(\.id) == [latest.id])
+    #expect(model.state.phase == .results)
+    #expect(audit.scanDates == [UITestFixtures.timestamp])
+}
+
+@Test @MainActor func cleanupIsIgnoredWhileAScanIsInProgress() async {
+    let scanned = UITestFixtures.candidate(risk: .green)
+    let coordinator = SuspendingFirstScanCoordinator(
+        firstReport: ScanReport(candidates: [scanned], failures: []),
+        laterReport: UITestFixtures.scanReport(candidateCount: 0, failureCount: 0)
+    )
+    let executor = StubCleanupExecutor()
+    let model = AppModel(
+        dependencies: .fixture(coordinator: coordinator, cleanupExecutor: executor)
+    )
+
+    let scan = Task { await model.scan() }
+    await coordinator.waitUntilFirstScanStarts()
+    await model.cleanGreenCandidates()
+    let plansBeforeCompletion = await executor.plans
+    await coordinator.resumeFirstScan()
+    await scan.value
+
+    #expect(plansBeforeCompletion.isEmpty)
+    #expect(model.state.candidates.map(\.id) == [scanned.id])
+    #expect(model.state.phase == .results)
+}
+
+@Test @MainActor func publicScanIsIgnoredWhileCleanupIsInProgress() async {
+    let candidate = UITestFixtures.candidate(risk: .green)
+    let firstReport = ScanReport(candidates: [candidate], failures: [])
+    let emptyReport = UITestFixtures.scanReport(candidateCount: 0, failureCount: 0)
+    let coordinator = RecordingScanCoordinator(reports: [firstReport, emptyReport])
+    let executor = SuspendingCleanupExecutor()
+    let model = AppModel(
+        dependencies: .fixture(coordinator: coordinator, cleanupExecutor: executor)
+    )
+    await model.scan()
+
+    let cleanup = Task { await model.cleanGreenCandidates() }
+    await executor.waitUntilExecutionStarts()
+    await model.scan()
+    let scanCountWhileCleaning = coordinator.scanCount
+    await executor.resumeExecution()
+    await cleanup.value
+
+    #expect(scanCountWhileCleaning == 1)
+    #expect(coordinator.scanCount == 2)
+    #expect(model.state.candidates.isEmpty)
+    #expect(model.state.phase == .results)
+}
+
 @Test @MainActor func revealDelegatesCanonicalCandidateURL() throws {
     let sourceURL = FileManager.default.temporaryDirectory
         .appending(path: "missing-source-\(UUID().uuidString)")
@@ -154,6 +252,105 @@ import Testing
     #expect(records[skipped.id]?.sizeBytes == 0)
     #expect(records[failed.id]?.outcome == .failed)
     #expect(records[failed.id]?.sizeBytes == 0)
+}
+
+enum MalformedCleanupResultKind: CaseIterable, Sendable {
+    case mismatchedPlanID
+    case missingPlannedResult
+    case duplicatePlannedResult
+    case extraUnknownResult
+    case extraUnplannedYellowResult
+}
+
+@Test(arguments: MalformedCleanupResultKind.allCases)
+@MainActor func malformedCleanupResultFailsEveryPlannedAuditAndRescans(
+    kind: MalformedCleanupResultKind
+) async {
+    let first = UITestFixtures.candidate(risk: .green)
+    let second = UITestFixtures.candidate(risk: .green)
+    let yellow = UITestFixtures.candidate(risk: .yellow)
+    let unknownID = UUID(uuidString: "DDDDDDDD-DDDD-DDDD-DDDD-DDDDDDDDDDDD")!
+    let report = ScanReport(candidates: [first, second, yellow], failures: [])
+    let emptyReport = UITestFixtures.scanReport(candidateCount: 0, failureCount: 0)
+    let coordinator = RecordingScanCoordinator(reports: [report, emptyReport])
+    let executor = StubCleanupExecutor { plan in
+        malformedCleanupResult(
+            kind: kind,
+            plan: plan,
+            yellowID: yellow.id,
+            unknownID: unknownID
+        )
+    }
+    let audit = InMemoryAuditStore()
+    let model = AppModel(
+        dependencies: .fixture(
+            coordinator: coordinator,
+            cleanupExecutor: executor,
+            audit: audit
+        )
+    )
+    await model.scan()
+
+    await model.cleanGreenCandidates()
+
+    #expect(audit.appendedRecords.count == 2)
+    #expect(Set(audit.appendedRecords.map(\.candidateID)) == Set([first.id, second.id]))
+    #expect(audit.appendedRecords.allSatisfy { $0.outcome == .failed })
+    #expect(audit.appendedRecords.allSatisfy { $0.sizeBytes == 0 })
+    #expect(audit.appendedRecords.allSatisfy {
+        $0.message?.contains("Cleanup executor protocol mismatch") == true
+    })
+    #expect(model.state.errorMessage?.contains("Cleanup executor protocol mismatch") == true)
+    #expect(coordinator.scanCount == 2)
+    #expect(model.state.candidates.isEmpty)
+}
+
+private func malformedCleanupResult(
+    kind: MalformedCleanupResultKind,
+    plan: CleanupPlan,
+    yellowID: UUID,
+    unknownID: UUID
+) -> CleanupResult {
+    let planned = plan.items.map {
+        CleanupItemResult(
+            candidateID: $0.candidateID,
+            status: .success(estimatedDeletedBytes: 500)
+        )
+    }
+
+    switch kind {
+    case .mismatchedPlanID:
+        let firstWrongID = UITestFixtures.auditID
+        let secondWrongID = UITestFixtures.scanID
+        return CleanupResult(
+            planID: plan.id == firstWrongID ? secondWrongID : firstWrongID,
+            items: planned
+        )
+    case .missingPlannedResult:
+        return CleanupResult(planID: plan.id, items: Array(planned.dropLast()))
+    case .duplicatePlannedResult:
+        return CleanupResult(planID: plan.id, items: [planned[0], planned[0], planned[1]])
+    case .extraUnknownResult:
+        return CleanupResult(
+            planID: plan.id,
+            items: planned + [
+                CleanupItemResult(
+                    candidateID: unknownID,
+                    status: .success(estimatedDeletedBytes: 500)
+                )
+            ]
+        )
+    case .extraUnplannedYellowResult:
+        return CleanupResult(
+            planID: plan.id,
+            items: planned + [
+                CleanupItemResult(
+                    candidateID: yellowID,
+                    status: .success(estimatedDeletedBytes: 500)
+                )
+            ]
+        )
+    }
 }
 
 @Test @MainActor func summariesCountRiskLevelsAndEstimateOnlyGreenBytes() async {
