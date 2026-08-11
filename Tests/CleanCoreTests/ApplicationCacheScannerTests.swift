@@ -1,0 +1,118 @@
+import Foundation
+import Testing
+@testable import CleanCore
+
+@Test func emitsInstalledBundleCacheAndReportsUnknownDirectoryAsRedEvidence() async throws {
+    let fixture = try CacheFixture(entries: ["com.example.Editor": 2_048, "mystery-cache": 128])
+    let scanner = ApplicationCacheScanner(
+        cacheRoot: fixture.root,
+        validator: fixture.validator,
+        fingerprinter: SystemFileFingerprinter()
+    )
+
+    let discoveries = try await scanner.scan(
+        context: fixture.context(installed: ["com.example.Editor"])
+    )
+
+    #expect(discoveries.count == 2)
+    #expect(discoveries.first { $0.evidence.ownerBundleID == "com.example.Editor" }?.kind == .regenerableApplicationCache)
+    #expect(discoveries.first { $0.sourceURL.lastPathComponent == "mystery-cache" }?.kind == .unknown)
+    #expect(discoveries.first { $0.sourceURL.lastPathComponent == "mystery-cache" }?.evidence.ownerBundleID == nil)
+}
+
+@Test func cacheScannerUsesExactBundleIDMatchesAndOnlyEmitsImmediateChildren() async throws {
+    let fixture = try CacheFixture(entries: ["com.example.Editor": 64])
+    let nested = fixture.root
+        .appending(path: "com.example.Editor")
+        .appending(path: "nested-cache")
+    try FileManager.default.createDirectory(at: nested, withIntermediateDirectories: true)
+    let scanner = ApplicationCacheScanner(
+        cacheRoot: fixture.root,
+        validator: fixture.validator,
+        fingerprinter: SystemFileFingerprinter()
+    )
+
+    let discoveries = try await scanner.scan(
+        context: fixture.context(installed: ["COM.EXAMPLE.EDITOR"])
+    )
+
+    #expect(discoveries.count == 1)
+    #expect(discoveries[0].sourceURL.lastPathComponent == "com.example.Editor")
+    #expect(discoveries[0].kind == .unknown)
+    #expect(discoveries[0].evidence.ownerBundleID == nil)
+}
+
+@Test func cacheScannerDoesNotClaimBundleOwnershipForARegularFile() async throws {
+    let fixture = try CacheFixture(entries: [:])
+    let file = fixture.root.appending(path: "com.example.Editor")
+    try Data(repeating: 0x41, count: 32).write(to: file)
+    let scanner = ApplicationCacheScanner(
+        cacheRoot: fixture.root,
+        validator: fixture.validator,
+        fingerprinter: SystemFileFingerprinter()
+    )
+
+    let discoveries = try await scanner.scan(
+        context: fixture.context(installed: ["com.example.Editor"])
+    )
+
+    #expect(discoveries.count == 1)
+    #expect(discoveries[0].kind == .unknown)
+    #expect(discoveries[0].evidence.ownerBundleID == nil)
+}
+
+@Test func directorySizerCountsRegularFilesWithoutFollowingSymbolicLinks() async throws {
+    let fixture = try CacheFixture(entries: ["com.example.Editor": 256])
+    let cache = fixture.root.appending(path: "com.example.Editor")
+    let external = FileManager.default.temporaryDirectory.appending(path: UUID().uuidString)
+    try FileManager.default.createDirectory(at: external, withIntermediateDirectories: true)
+    defer { try? FileManager.default.removeItem(at: external) }
+    try Data(repeating: 0x42, count: 4_096).write(to: external.appending(path: "external.bin"))
+    try FileManager.default.createSymbolicLink(
+        at: cache.appending(path: "linked-external"),
+        withDestinationURL: external
+    )
+
+    let size = try await DirectorySizer().size(of: cache)
+
+    #expect(size == 256)
+}
+
+@Test func directorySizerPropagatesCancellation() async throws {
+    let fixture = try CacheFixture(entries: ["com.example.Editor": 1])
+    let cache = fixture.root.appending(path: "com.example.Editor")
+
+    do {
+        _ = try await Task {
+            withUnsafeCurrentTask { $0?.cancel() }
+            return try await DirectorySizer().size(of: cache)
+        }.value
+        Issue.record("Expected directory sizing to throw CancellationError")
+    } catch is CancellationError {
+        // Expected.
+    }
+}
+
+private final class CacheFixture {
+    let root: URL
+    let validator: SafePathValidator
+
+    init(entries: [String: Int]) throws {
+        root = FileManager.default.temporaryDirectory.appending(path: UUID().uuidString)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        for (name, count) in entries {
+            let directory = root.appending(path: name)
+            try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+            try Data(repeating: 0x41, count: count).write(to: directory.appending(path: "payload.bin"))
+        }
+        validator = SafePathValidator(allowedRoots: [root], forbiddenExactPaths: [])
+    }
+
+    func context(installed: [String]) -> ScanContext {
+        CoreTestFixtures.context(installed: installed)
+    }
+
+    deinit {
+        try? FileManager.default.removeItem(at: root)
+    }
+}
