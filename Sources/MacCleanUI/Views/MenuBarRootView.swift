@@ -1,6 +1,26 @@
 import Foundation
 import SwiftUI
 
+struct EstimatedSpaceValueText: View {
+    let value: String
+    @ScaledMetric(relativeTo: .largeTitle) private var pointSize = 28.0
+
+    var body: some View {
+        EstimatedSpaceScaledText(value: value, pointSize: pointSize)
+    }
+}
+
+struct EstimatedSpaceScaledText: View {
+    let value: String
+    let pointSize: CGFloat
+
+    var body: some View {
+        Text(value)
+            .font(.system(size: pointSize, weight: .bold, design: .rounded))
+            .monospacedDigit()
+    }
+}
+
 @MainActor
 public struct MenuBarRootView: View {
     @Bindable private var model: AppModel
@@ -20,9 +40,7 @@ public struct MenuBarRootView: View {
             }
 
             VStack(alignment: .leading, spacing: 2) {
-                Text(formattedEstimatedBytes)
-                    .font(.system(size: 28, weight: .bold, design: .rounded))
-                    .monospacedDigit()
+                EstimatedSpaceValueText(value: formattedEstimatedBytes)
                 Text("预计可释放空间")
                     .font(.subheadline)
                     .foregroundStyle(.secondary)

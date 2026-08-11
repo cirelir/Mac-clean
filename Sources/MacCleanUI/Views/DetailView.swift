@@ -2,6 +2,24 @@ import CleanCore
 import Foundation
 import SwiftUI
 
+struct CandidateSearchPresentation {
+    let query: String
+
+    var normalizedQuery: String {
+        query.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    var emptyTitle: String {
+        normalizedQuery.isEmpty ? "尚无候选项" : "没有匹配的候选项"
+    }
+
+    var emptyDescription: String {
+        normalizedQuery.isEmpty
+            ? "从菜单栏运行扫描后，候选项会按风险分组显示。"
+            : "请尝试其他名称、路径、来源或规则。"
+    }
+}
+
 @MainActor
 public struct DetailView: View {
     @Bindable private var model: AppModel
@@ -20,9 +38,9 @@ public struct DetailView: View {
             Group {
                 if filteredCandidates.isEmpty {
                     ContentUnavailableView {
-                        Label(emptyTitle, systemImage: "magnifyingglass")
+                        Label(searchPresentation.emptyTitle, systemImage: "magnifyingglass")
                     } description: {
-                        Text(emptyDescription)
+                        Text(searchPresentation.emptyDescription)
                     }
                 } else {
                     candidateList
@@ -156,7 +174,7 @@ public struct DetailView: View {
     }
 
     private var filteredCandidates: [CleanupCandidate] {
-        let query = searchText.trimmingCharacters(in: .whitespacesAndNewlines)
+        let query = searchPresentation.normalizedQuery
         guard !query.isEmpty else { return model.state.candidates }
 
         return model.state.candidates.filter { candidate in
@@ -208,14 +226,8 @@ public struct DetailView: View {
         )
     }
 
-    private var emptyTitle: String {
-        searchText.isEmpty ? "尚无候选项" : "没有匹配的候选项"
-    }
-
-    private var emptyDescription: String {
-        searchText.isEmpty
-            ? "从菜单栏运行扫描后，候选项会按风险分组显示。"
-            : "请尝试其他名称、路径、来源或规则。"
+    private var searchPresentation: CandidateSearchPresentation {
+        CandidateSearchPresentation(query: searchText)
     }
 
     private func riskTitle(_ risk: RiskLevel) -> String {

@@ -17,21 +17,15 @@ public struct CandidatePresentation {
     }
 
     public var isFinderActionEnabled: Bool {
-        if case .available = finderRevealState {
-            return true
-        }
-        return false
+        finderActionSnapshot.isEnabled
     }
 
     public var finderAccessibilityHint: String {
-        switch finderRevealState {
-        case .available:
-            "在 Finder 中选中此项目。"
-        case .unavailable(.missing):
-            "路径不存在或已被清理，无法在 Finder 中显示。"
-        case .unavailable(.inaccessible):
-            "没有访问此路径的权限，无法在 Finder 中显示。"
-        }
+        finderActionSnapshot.accessibilityHint
+    }
+
+    var finderActionSnapshot: FinderActionSnapshot {
+        FinderActionSnapshot(revealState: finderRevealState)
     }
 
     public init(candidate: CleanupCandidate, fileManager: FileManager = .default) {
@@ -52,15 +46,63 @@ public struct CandidatePresentation {
     }
 }
 
+struct FinderActionSnapshot: Equatable {
+    let revealState: FinderRevealState
+
+    var isEnabled: Bool {
+        if case .available = revealState {
+            return true
+        }
+        return false
+    }
+
+    var accessibilityHint: String {
+        switch revealState {
+        case .available:
+            "在 Finder 中选中此项目。"
+        case .unavailable(.missing):
+            "路径不存在或已被清理，无法在 Finder 中显示。"
+        case .unavailable(.inaccessible):
+            "没有访问此路径的权限，无法在 Finder 中显示。"
+        }
+    }
+}
+
+struct FinderAvailabilityRefreshState {
+    private(set) var snapshot: FinderActionSnapshot
+
+    init(candidate: CleanupCandidate, fileManager: FileManager = .default) {
+        snapshot = CandidatePresentation(
+            candidate: candidate,
+            fileManager: fileManager
+        ).finderActionSnapshot
+    }
+
+    mutating func refresh(
+        candidate: CleanupCandidate,
+        fileManager: FileManager = .default
+    ) {
+        snapshot = CandidatePresentation(
+            candidate: candidate,
+            fileManager: fileManager
+        ).finderActionSnapshot
+    }
+}
+
 @MainActor
 public struct CandidateRow: View {
     private let candidate: CleanupCandidate
     @Bindable private var model: AppModel
+    @Environment(\.scenePhase) private var scenePhase
     @State private var isExpanded = false
+    @State private var finderAvailability: FinderAvailabilityRefreshState
 
     public init(candidate: CleanupCandidate, model: AppModel) {
         self.candidate = candidate
         self.model = model
+        _finderAvailability = State(
+            initialValue: FinderAvailabilityRefreshState(candidate: candidate)
+        )
     }
 
     public var body: some View {
@@ -76,9 +118,9 @@ public struct CandidateRow: View {
                     Label(presentation.finderActionTitle, systemImage: "folder")
                 }
                 .buttonStyle(.bordered)
-                .disabled(!presentation.isFinderActionEnabled)
+                .disabled(!finderAvailability.snapshot.isEnabled)
                 .accessibilityLabel(presentation.finderActionTitle)
-                .accessibilityHint(presentation.finderAccessibilityHint)
+                .accessibilityHint(finderAvailability.snapshot.accessibilityHint)
             }
             .padding(.top, 8)
         } label: {
@@ -118,10 +160,27 @@ public struct CandidateRow: View {
             )
             .accessibilityHint(isExpanded ? "折叠证据详情" : "展开证据详情")
         }
+        .onAppear {
+            refreshFinderAvailability()
+        }
+        .onChange(of: isExpanded) { _, expanded in
+            if expanded {
+                refreshFinderAvailability()
+            }
+        }
+        .onChange(of: scenePhase) { _, phase in
+            if phase == .active {
+                refreshFinderAvailability()
+            }
+        }
     }
 
     private var presentation: CandidatePresentation {
         CandidatePresentation(candidate: candidate)
+    }
+
+    private func refreshFinderAvailability() {
+        finderAvailability.refresh(candidate: candidate)
     }
 
     private var evidenceDetails: some View {
