@@ -25,9 +25,16 @@ public struct DirectorySizer: DirectorySizing, Sendable {
             return try adding(UInt64(max(0, rootValues.fileSize ?? 0)), to: 0)
         }
 
+        var enumerationFailureURL: URL?
         guard let enumerator = FileManager.default.enumerator(
             at: url,
-            includingPropertiesForKeys: keys
+            includingPropertiesForKeys: keys,
+            errorHandler: { failingURL, _ in
+                if enumerationFailureURL == nil {
+                    enumerationFailureURL = failingURL
+                }
+                return false
+            }
         ) else {
             throw DirectorySizingError.cannotEnumerate(url)
         }
@@ -52,6 +59,9 @@ public struct DirectorySizer: DirectorySizing, Sendable {
             total = try adding(UInt64(max(0, values.fileSize ?? 0)), to: total)
         }
 
+        if let enumerationFailureURL {
+            throw DirectorySizingError.cannotEnumerate(enumerationFailureURL)
+        }
         try Task.checkCancellation()
         return total
     }

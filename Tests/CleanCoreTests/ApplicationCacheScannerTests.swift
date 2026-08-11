@@ -93,6 +93,33 @@ import Testing
     }
 }
 
+@Test func directorySizerThrowsInsteadOfReturningPartialSizeForUnreadableDescendant() async throws {
+    let fixture = try CacheFixture(entries: ["com.example.Editor": 64])
+    let cache = fixture.root.appending(path: "com.example.Editor")
+    let blocked = cache.appending(path: "blocked")
+    try FileManager.default.createDirectory(at: blocked, withIntermediateDirectories: true)
+    try Data(repeating: 0x42, count: 4_096).write(to: blocked.appending(path: "hidden.bin"))
+    try FileManager.default.setAttributes([.posixPermissions: 0], ofItemAtPath: blocked.path)
+    defer {
+        try? FileManager.default.setAttributes(
+            [.posixPermissions: 0o700],
+            ofItemAtPath: blocked.path
+        )
+    }
+
+    do {
+        let partialSize = try await DirectorySizer().size(of: cache)
+        Issue.record("Expected unreadable descendant to throw, got partial size \(partialSize)")
+    } catch DirectorySizingError.cannotEnumerate(let failureURL) {
+        #expect(
+            failureURL.standardizedFileURL.resolvingSymlinksInPath()
+                == blocked.standardizedFileURL.resolvingSymlinksInPath()
+        )
+    } catch {
+        Issue.record("Expected cannotEnumerate, got \(error)")
+    }
+}
+
 private final class CacheFixture {
     let root: URL
     let validator: SafePathValidator

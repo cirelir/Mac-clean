@@ -32,6 +32,36 @@ import Testing
     #expect(report.failures.isEmpty)
 }
 
+@Test func coordinatorReportsApplicationCacheTraversalFailureWithoutGreenCandidate() async throws {
+    let root = FileManager.default.temporaryDirectory.appending(path: UUID().uuidString)
+    let cache = root.appending(path: "com.example.Editor")
+    let blocked = cache.appending(path: "blocked")
+    try FileManager.default.createDirectory(at: blocked, withIntermediateDirectories: true)
+    try Data(repeating: 0x41, count: 64).write(to: cache.appending(path: "payload.bin"))
+    try Data(repeating: 0x42, count: 4_096).write(to: blocked.appending(path: "hidden.bin"))
+    try FileManager.default.setAttributes([.posixPermissions: 0], ofItemAtPath: blocked.path)
+    defer {
+        try? FileManager.default.setAttributes(
+            [.posixPermissions: 0o700],
+            ofItemAtPath: blocked.path
+        )
+        try? FileManager.default.removeItem(at: root)
+    }
+    let scanner = ApplicationCacheScanner(
+        cacheRoot: root,
+        validator: SafePathValidator(allowedRoots: [root], forbiddenExactPaths: []),
+        fingerprinter: SystemFileFingerprinter()
+    )
+    let coordinator = ScanCoordinator(scanners: [scanner], classifier: RiskClassifier())
+
+    let report = await coordinator.scan(
+        context: CoreTestFixtures.context(installed: ["com.example.Editor"])
+    )
+
+    #expect(report.candidates.isEmpty)
+    #expect(report.failures.map(\.scannerID) == ["application-cache"])
+}
+
 private struct FixtureScanner: CleanCore.Scanner {
     enum FixtureError: Error { case expectedFailure }
 
