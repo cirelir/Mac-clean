@@ -11,7 +11,12 @@ public actor UserNotificationService: NotificationSending {
     private var hasRequestedAuthorization = false
 
     public init() {
-        client = SystemNotificationCenterClient()
+        if Bundle.main.bundleURL.pathExtension.caseInsensitiveCompare("app") == .orderedSame,
+           Bundle.main.bundleIdentifier != nil {
+            client = SystemNotificationCenterClient()
+        } else {
+            client = UnavailableNotificationCenterClient()
+        }
     }
 
     init(client: any NotificationCenterClient) {
@@ -93,4 +98,16 @@ private struct SystemNotificationCenterClient: NotificationCenterClient, @unchec
         )
         try await center.add(request)
     }
+}
+
+private struct UnavailableNotificationCenterClient: NotificationCenterClient {
+    func authorizationState() async -> NotificationAuthorizationState {
+        .denied
+    }
+
+    func requestAuthorization() async throws -> Bool {
+        false
+    }
+
+    func deliver(_ notification: CleanupSummaryNotification) async throws {}
 }

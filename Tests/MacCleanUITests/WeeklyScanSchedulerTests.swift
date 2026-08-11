@@ -19,6 +19,15 @@ import Testing
     #expect(WeeklyScanScheduler.isDue(lastScan: nil, now: UITestFixtures.timestamp))
 }
 
+@Test func defaultNotificationServiceIsSafeOutsideAnApplicationBundle() async {
+    #expect(Bundle.main.bundleURL.pathExtension != "app")
+    let service = UserNotificationService()
+
+    let authorized = await service.requestAuthorizationIfNeeded()
+
+    #expect(!authorized)
+}
+
 @Test func deniedNotificationAuthorizationIsNotRequestedAgain() async {
     let client = NotificationClientStub(status: .notDetermined, requestResult: false)
     let service = UserNotificationService(client: client)
