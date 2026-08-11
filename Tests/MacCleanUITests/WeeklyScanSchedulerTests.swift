@@ -61,8 +61,8 @@ import Testing
     #expect(snapshot.requestCount == 0)
     #expect(snapshot.notifications == [
         CleanupSummaryNotification(
-            title: "Mac Clean Weekly Summary",
-            body: "Estimated cleaned data: 1024 bytes. Pending review: 3."
+            title: "Mac Clean 每周摘要",
+            body: "预计清理 1024 字节；待确认 3 项。"
         )
     ])
 }

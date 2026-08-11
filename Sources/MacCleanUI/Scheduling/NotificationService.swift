@@ -43,9 +43,8 @@ public actor UserNotificationService: NotificationSending {
         guard await requestAuthorizationIfNeeded() else { return }
 
         let notification = CleanupSummaryNotification(
-            title: "Mac Clean Weekly Summary",
-            body: "Estimated cleaned data: \(estimatedDeletedBytes) bytes. "
-                + "Pending review: \(pendingReviewCount)."
+            title: "Mac Clean 每周摘要",
+            body: "预计清理 \(estimatedDeletedBytes) 字节；待确认 \(pendingReviewCount) 项。"
         )
         try? await client.deliver(notification)
     }

@@ -225,6 +225,10 @@ actor SuspendingFirstScanCoordinator: ScanCoordinating {
         firstContinuation?.resume(returning: firstReport)
         firstContinuation = nil
     }
+
+    func recordedScanCount() -> Int {
+        callCount
+    }
 }
 
 actor SuspendingCleanupExecutor: CleanupExecuting {

@@ -20,6 +20,9 @@ struct MacCleanApp: App {
         MenuBarExtra("Mac Clean", systemImage: "externaldrive.badge.checkmark") {
             if let model {
                 MenuBarRootView(model: model)
+                    .task {
+                        await model.performCatchUpScanIfDue()
+                    }
             } else {
                 StartupFailureView(message: initializationFailure)
                     .padding(16)

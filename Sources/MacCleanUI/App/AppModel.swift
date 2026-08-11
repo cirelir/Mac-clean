@@ -2,6 +2,16 @@ import CleanCore
 import Foundation
 import Observation
 
+public struct CatchUpCleanupSummary: Equatable, Sendable {
+    public let estimatedDeletedBytes: UInt64
+    public let pendingReviewCount: Int
+
+    public init(estimatedDeletedBytes: UInt64, pendingReviewCount: Int) {
+        self.estimatedDeletedBytes = estimatedDeletedBytes
+        self.pendingReviewCount = pendingReviewCount
+    }
+}
+
 public struct AppDependencies {
     public let inventory: any ApplicationInventoryProviding
     public let coordinator: any ScanCoordinating
@@ -61,6 +71,9 @@ public final class AppModel {
     @ObservationIgnored
     private var scanGeneration: UInt64 = 0
 
+    @ObservationIgnored
+    private var catchUpInProgress = false
+
     public init(dependencies: AppDependencies) {
         self.dependencies = dependencies
     }
@@ -88,7 +101,12 @@ public final class AppModel {
     }
 
     public func scan() async {
-        guard state.phase != .cleaning else { return }
+        guard !catchUpInProgress else { return }
+        _ = await performScan()
+    }
+
+    private func performScan() async -> Bool {
+        guard state.phase != .cleaning else { return false }
 
         scanGeneration &+= 1
         let generation = scanGeneration
@@ -100,11 +118,11 @@ public final class AppModel {
 
         do {
             let inventory = try await dependencies.inventory.inventory()
-            guard generation == scanGeneration else { return }
+            guard generation == scanGeneration else { return false }
             let report = await dependencies.coordinator.scan(
                 context: ScanContext(inventory: inventory, now: dependencies.now())
             )
-            guard generation == scanGeneration else { return }
+            guard generation == scanGeneration else { return false }
 
             let completedAt = dependencies.now()
             try dependencies.audit.recordScan(at: completedAt)
@@ -113,35 +131,100 @@ public final class AppModel {
             state.lastScan = completedAt
             currentScanID = UUID()
             state.phase = .results
+            return true
         } catch {
-            guard generation == scanGeneration else { return }
+            guard generation == scanGeneration else { return false }
             state.candidates = []
             state.failures = []
             currentScanID = nil
             state.errorMessage = String(describing: error)
             state.phase = .idle
+            return false
         }
     }
 
+    @discardableResult
+    public func performCatchUpScanIfDue() async -> CatchUpCleanupSummary? {
+        guard
+            !catchUpInProgress,
+            state.phase != .scanning,
+            state.phase != .cleaning
+        else { return nil }
+
+        let lastScan: Date?
+        do {
+            lastScan = try dependencies.audit.latestScanDate()
+        } catch {
+            state.errorMessage = String(describing: error)
+            return nil
+        }
+
+        guard WeeklyScanScheduler.isDue(lastScan: lastScan, now: dependencies.now()) else {
+            return nil
+        }
+
+        catchUpInProgress = true
+        defer { catchUpInProgress = false }
+        guard await performScan() else { return nil }
+
+        let pendingReviewCount = state.candidates.count { $0.risk == .yellow }
+        let summary: CatchUpCleanupSummary
+        if state.candidates.contains(where: { $0.risk == .green }) {
+            guard let cleanupSummary = await performGreenCleanup(
+                pendingReviewCount: pendingReviewCount
+            ) else {
+                return nil
+            }
+            summary = cleanupSummary
+        } else {
+            summary = CatchUpCleanupSummary(
+                estimatedDeletedBytes: 0,
+                pendingReviewCount: pendingReviewCount
+            )
+        }
+
+        await dependencies.notifications.sendCleanupSummary(
+            estimatedDeletedBytes: summary.estimatedDeletedBytes,
+            pendingReviewCount: summary.pendingReviewCount
+        )
+        return summary
+    }
+
     public func cleanGreenCandidates() async {
-        guard state.phase == .results, let currentScanID else { return }
+        guard !catchUpInProgress else { return }
+        _ = await performGreenCleanup(
+            pendingReviewCount: state.candidates.count { $0.risk == .yellow }
+        )
+    }
+
+    private func performGreenCleanup(
+        pendingReviewCount: Int
+    ) async -> CatchUpCleanupSummary? {
+        guard state.phase == .results, let currentScanID else { return nil }
 
         let candidates = state.candidates
         let scanID = currentScanID
-        state.phase = .cleaning
-        state.errorMessage = nil
-
         let plan = dependencies.planner.plan(
             candidates: candidates,
             confirmedIDs: [],
             now: dependencies.now()
         )
+        guard !plan.items.isEmpty else {
+            return CatchUpCleanupSummary(
+                estimatedDeletedBytes: 0,
+                pendingReviewCount: pendingReviewCount
+            )
+        }
+
+        state.phase = .cleaning
+        state.errorMessage = nil
         let result = await dependencies.cleanupExecutor.execute(plan)
         let completedAt = dependencies.now()
         let candidatesByID = Dictionary(uniqueKeysWithValues: candidates.map { ($0.id, $0) })
         var auditErrors: [String] = []
 
-        if let mismatch = cleanupProtocolMismatch(plan: plan, result: result) {
+        let protocolMismatch = cleanupProtocolMismatch(plan: plan, result: result)
+        if let mismatch = protocolMismatch {
             auditErrors.append(mismatch)
             for plannedItem in plan.items {
                 guard let candidate = candidatesByID[plannedItem.candidateID] else { continue }
@@ -179,11 +262,15 @@ public final class AppModel {
             }
         }
 
+        let summary = protocolMismatch == nil
+            ? cleanupSummary(for: result, pendingReviewCount: pendingReviewCount)
+            : nil
         state.phase = .results
-        await scan()
+        _ = await performScan()
         if !auditErrors.isEmpty {
             state.errorMessage = auditErrors.joined(separator: "\n")
         }
+        return summary
     }
 
     public func reveal(_ candidate: CleanupCandidate) {
@@ -253,5 +340,28 @@ public final class AppModel {
         case .failed(let message):
             return (0, .failed, message)
         }
+    }
+
+    private func cleanupSummary(
+        for result: CleanupResult,
+        pendingReviewCount: Int
+    ) -> CatchUpCleanupSummary {
+        let estimatedDeletedBytes = result.items.reduce(UInt64(0)) { total, item in
+            let itemBytes: UInt64
+            switch item.status {
+            case .success(let estimatedDeletedBytes),
+                 .partial(let estimatedDeletedBytes, _):
+                itemBytes = estimatedDeletedBytes
+            case .skipped, .failed:
+                itemBytes = 0
+            }
+
+            let (sum, overflow) = total.addingReportingOverflow(itemBytes)
+            return overflow ? UInt64.max : sum
+        }
+        return CatchUpCleanupSummary(
+            estimatedDeletedBytes: estimatedDeletedBytes,
+            pendingReviewCount: pendingReviewCount
+        )
     }
 }
