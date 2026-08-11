@@ -3,6 +3,10 @@ import Foundation
 import Testing
 @testable import MacCleanUI
 
+enum CleanupInvocation: CaseIterable, Sendable {
+    case manual, catchUp
+}
+
 @Test @MainActor func launchPerformsOneCatchUpScanWhenLastScanIsOverdue() async {
     let now = Date(timeIntervalSince1970: 1_700_700_000)
     let coordinator = RecordingScanCoordinator()
@@ -182,6 +186,43 @@ import Testing
     #expect(model.state.errorMessage?.contains("inventoryUnavailable") == true)
 }
 
+@Test @MainActor func catchUpScannerFailureDoesNotSuppressSameTimeRetry() async {
+    let now = Date(timeIntervalSince1970: 1_700_700_000)
+    let oldScan = Date(timeIntervalSince1970: 1_700_000_000)
+    let failure = ScannerFailure(
+        scannerID: "application-cache",
+        message: "cache root unreadable"
+    )
+    let failedReport = ScanReport(candidates: [], failures: [failure])
+    let coordinator = RecordingScanCoordinator(reports: [failedReport, failedReport])
+    let executor = StubCleanupExecutor()
+    let audit = InMemoryAuditStore(lastScan: oldScan)
+    let notifications = RecordingNotificationService()
+    let model = AppModel(
+        dependencies: .fixture(
+            now: { now },
+            coordinator: coordinator,
+            cleanupExecutor: executor,
+            audit: audit,
+            notifications: notifications
+        )
+    )
+
+    let firstSummary = await model.performCatchUpScanIfDue()
+    let secondSummary = await model.performCatchUpScanIfDue()
+
+    let plans = await executor.plans
+    let delivered = await notifications.summaries
+    #expect(firstSummary == nil)
+    #expect(secondSummary == nil)
+    #expect(coordinator.scanCount == 2)
+    #expect(audit.scanDates == [oldScan])
+    #expect(plans.isEmpty)
+    #expect(delivered.isEmpty)
+    #expect(model.state.failures == [failure])
+    #expect(model.state.phase == .results)
+}
+
 @Test @MainActor func manualScanCannotInvalidateAnActiveCatchUpScan() async {
     let now = Date(timeIntervalSince1970: 1_700_700_000)
     let coordinator = SuspendingFirstScanCoordinator(
@@ -296,4 +337,147 @@ private actor CatchUpNotificationClientStub: NotificationCenterClient {
     func snapshot() -> (requestCount: Int, deliveryCount: Int) {
         (requestCount, deliveryCount)
     }
+}
+
+@Test(arguments: CleanupInvocation.allCases)
+@MainActor func cleanupSkipsGreenOwnerThatStartedRunning(
+    invocation: CleanupInvocation
+) async {
+    let now = Date(timeIntervalSince1970: 1_700_700_000)
+    let green = UITestFixtures.candidate(risk: .green, sizeBytes: 1_000)
+    let initialInventory = cleanupInventory(runningBundleIDs: [])
+    let runningInventory = cleanupInventory(
+        runningBundleIDs: ["com.example.Editor"]
+    )
+    let inventory = SequencedInventoryProvider(
+        results: [
+            .success(initialInventory),
+            .success(runningInventory),
+            .success(runningInventory)
+        ]
+    )
+    let coordinator = RecordingScanCoordinator(
+        reports: [
+            ScanReport(candidates: [green], failures: []),
+            UITestFixtures.scanReport(candidateCount: 0, failureCount: 0)
+        ]
+    )
+    let executor = StubCleanupExecutor { plan in
+        CleanupResult(
+            planID: plan.id,
+            items: plan.items.map {
+                CleanupItemResult(
+                    candidateID: $0.candidateID,
+                    status: .success(estimatedDeletedBytes: 900)
+                )
+            }
+        )
+    }
+    let notifications = RecordingNotificationService()
+    let model = AppModel(
+        dependencies: .fixture(
+            lastScan: Date(timeIntervalSince1970: 1_700_000_000),
+            now: { now },
+            inventory: inventory,
+            coordinator: coordinator,
+            cleanupExecutor: executor,
+            notifications: notifications
+        )
+    )
+
+    let summary: CatchUpCleanupSummary?
+    switch invocation {
+    case .manual:
+        await model.scan()
+        await model.cleanGreenCandidates()
+        summary = nil
+    case .catchUp:
+        summary = await model.performCatchUpScanIfDue()
+    }
+
+    let plans = await executor.plans
+    let delivered = await notifications.summaries
+    #expect(plans.isEmpty)
+    #expect(coordinator.scanCount == 2)
+    #expect(model.state.candidates.isEmpty)
+    #expect(model.state.phase == .results)
+    #expect(delivered.isEmpty)
+    if invocation == .catchUp {
+        #expect(summary == nil)
+    }
+}
+
+@Test(arguments: CleanupInvocation.allCases)
+@MainActor func cleanupFailsClosedWhenFreshInventoryIsUnavailable(
+    invocation: CleanupInvocation
+) async {
+    let now = Date(timeIntervalSince1970: 1_700_700_000)
+    let green = UITestFixtures.candidate(risk: .green, sizeBytes: 1_000)
+    let inventory = SequencedInventoryProvider(
+        results: [
+            .success(cleanupInventory(runningBundleIDs: [])),
+            .failure(.inventoryUnavailable)
+        ]
+    )
+    let coordinator = RecordingScanCoordinator(
+        reports: [ScanReport(candidates: [green], failures: [])]
+    )
+    let executor = StubCleanupExecutor { plan in
+        CleanupResult(
+            planID: plan.id,
+            items: plan.items.map {
+                CleanupItemResult(
+                    candidateID: $0.candidateID,
+                    status: .success(estimatedDeletedBytes: 900)
+                )
+            }
+        )
+    }
+    let notifications = RecordingNotificationService()
+    let model = AppModel(
+        dependencies: .fixture(
+            lastScan: Date(timeIntervalSince1970: 1_700_000_000),
+            now: { now },
+            inventory: inventory,
+            coordinator: coordinator,
+            cleanupExecutor: executor,
+            notifications: notifications
+        )
+    )
+
+    let summary: CatchUpCleanupSummary?
+    switch invocation {
+    case .manual:
+        await model.scan()
+        await model.cleanGreenCandidates()
+        summary = nil
+    case .catchUp:
+        summary = await model.performCatchUpScanIfDue()
+    }
+
+    let plans = await executor.plans
+    let delivered = await notifications.summaries
+    #expect(plans.isEmpty)
+    #expect(coordinator.scanCount == 1)
+    #expect(model.state.phase == .results)
+    #expect(model.state.errorMessage?.contains("inventoryUnavailable") == true)
+    #expect(delivered.isEmpty)
+    if invocation == .catchUp {
+        #expect(summary == nil)
+    }
+}
+
+private func cleanupInventory(
+    runningBundleIDs: Set<String>
+) -> ApplicationInventory {
+    ApplicationInventory(
+        installedApplications: [
+            InstalledApplication(
+                name: "Editor",
+                bundleID: "com.example.Editor",
+                url: URL(fileURLWithPath: "/Applications/Editor.app")
+            )
+        ],
+        runningBundleIDs: runningBundleIDs
+    )
 }

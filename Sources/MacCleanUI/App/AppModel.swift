@@ -46,6 +46,10 @@ public struct AppDependencies {
 @MainActor
 @Observable
 public final class AppModel {
+    private enum ScanMode {
+        case manual, weeklyCatchUp
+    }
+
     public enum Phase: Equatable {
         case idle, scanning, results, cleaning
     }
@@ -102,10 +106,10 @@ public final class AppModel {
 
     public func scan() async {
         guard !catchUpInProgress else { return }
-        _ = await performScan()
+        _ = await performScan(mode: .manual)
     }
 
-    private func performScan() async -> Bool {
+    private func performScan(mode: ScanMode) async -> Bool {
         guard state.phase != .cleaning else { return false }
 
         scanGeneration &+= 1
@@ -124,10 +128,16 @@ public final class AppModel {
             )
             guard generation == scanGeneration else { return false }
 
-            let completedAt = dependencies.now()
-            try dependencies.audit.recordScan(at: completedAt)
             state.candidates = report.candidates
             state.failures = report.failures
+            if mode == .weeklyCatchUp, !report.failures.isEmpty {
+                currentScanID = nil
+                state.phase = .results
+                return false
+            }
+
+            let completedAt = dependencies.now()
+            try dependencies.audit.recordScan(at: completedAt)
             state.lastScan = completedAt
             currentScanID = UUID()
             state.phase = .results
@@ -165,7 +175,7 @@ public final class AppModel {
 
         catchUpInProgress = true
         defer { catchUpInProgress = false }
-        guard await performScan() else { return nil }
+        guard await performScan(mode: .weeklyCatchUp) else { return nil }
 
         let pendingReviewCount = state.candidates.count { $0.risk == .yellow }
         let summary: CatchUpCleanupSummary
@@ -204,12 +214,7 @@ public final class AppModel {
 
         let candidates = state.candidates
         let scanID = currentScanID
-        let plan = dependencies.planner.plan(
-            candidates: candidates,
-            confirmedIDs: [],
-            now: dependencies.now()
-        )
-        guard !plan.items.isEmpty else {
+        guard candidates.contains(where: { $0.risk == .green }) else {
             return CatchUpCleanupSummary(
                 estimatedDeletedBytes: 0,
                 pendingReviewCount: pendingReviewCount
@@ -218,6 +223,33 @@ public final class AppModel {
 
         state.phase = .cleaning
         state.errorMessage = nil
+        let latestInventory: ApplicationInventory
+        do {
+            latestInventory = try await dependencies.inventory.inventory()
+        } catch {
+            state.phase = .results
+            state.errorMessage = String(describing: error)
+            return nil
+        }
+
+        let revalidatedCandidates = candidates.filter { candidate in
+            guard candidate.risk == .green else { return true }
+            guard let ownerBundleID = candidate.evidence.ownerBundleID else {
+                return false
+            }
+            return !latestInventory.runningBundleIDs.contains(ownerBundleID)
+        }
+        let plan = dependencies.planner.plan(
+            candidates: revalidatedCandidates,
+            confirmedIDs: [],
+            now: dependencies.now()
+        )
+        guard !plan.items.isEmpty else {
+            state.phase = .results
+            _ = await performScan(mode: .manual)
+            return nil
+        }
+
         let result = await dependencies.cleanupExecutor.execute(plan)
         let completedAt = dependencies.now()
         let candidatesByID = Dictionary(uniqueKeysWithValues: candidates.map { ($0.id, $0) })
@@ -266,9 +298,10 @@ public final class AppModel {
             ? cleanupSummary(for: result, pendingReviewCount: pendingReviewCount)
             : nil
         state.phase = .results
-        _ = await performScan()
-        if !auditErrors.isEmpty {
-            state.errorMessage = auditErrors.joined(separator: "\n")
+        _ = await performScan(mode: .manual)
+        let combinedErrors = auditErrors + [state.errorMessage].compactMap { $0 }
+        if !combinedErrors.isEmpty {
+            state.errorMessage = combinedErrors.joined(separator: "\n")
         }
         return summary
     }

@@ -254,6 +254,43 @@ import Testing
     #expect(records[failed.id]?.sizeBytes == 0)
 }
 
+@Test @MainActor func cleanupPreservesAuditAndInternalRescanErrors() async {
+    let green = UITestFixtures.candidate(risk: .green)
+    let inventory = SequencedInventoryProvider(
+        results: [
+            .success(ApplicationInventory(installedApplications: [], runningBundleIDs: [])),
+            .success(ApplicationInventory(installedApplications: [], runningBundleIDs: [])),
+            .failure(.inventoryUnavailable)
+        ]
+    )
+    let coordinator = RecordingScanCoordinator(
+        reports: [ScanReport(candidates: [green], failures: [])]
+    )
+    let executor = StubCleanupExecutor(
+        resultItems: [
+            CleanupItemResult(
+                candidateID: green.id,
+                status: .success(estimatedDeletedBytes: 900)
+            )
+        ]
+    )
+    let audit = FailingAppendAuditStore()
+    let model = AppModel(
+        dependencies: .fixture(
+            inventory: inventory,
+            coordinator: coordinator,
+            cleanupExecutor: executor,
+            audit: audit
+        )
+    )
+    await model.scan()
+
+    await model.cleanGreenCandidates()
+
+    #expect(model.state.errorMessage?.contains("auditUnavailable") == true)
+    #expect(model.state.errorMessage?.contains("inventoryUnavailable") == true)
+}
+
 enum MalformedCleanupResultKind: CaseIterable, Sendable {
     case mismatchedPlanID
     case missingPlannedResult

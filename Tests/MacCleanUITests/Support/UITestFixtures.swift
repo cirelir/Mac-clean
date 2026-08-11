@@ -98,7 +98,7 @@ enum UITestFixtures {
 }
 
 enum UITestFixtureError: Error, Sendable {
-    case inventoryUnavailable
+    case inventoryUnavailable, auditUnavailable
 }
 
 struct StubInventoryProvider: ApplicationInventoryProviding {
@@ -297,6 +297,31 @@ final class InMemoryAuditStore: AuditStoring {
 
     func clear() throws {
         appendedRecords.removeAll()
+        scanDates.removeAll()
+    }
+}
+
+@MainActor
+final class FailingAppendAuditStore: AuditStoring {
+    private(set) var scanDates: [Date] = []
+
+    func append(_ record: AuditRecord) throws {
+        throw UITestFixtureError.auditUnavailable
+    }
+
+    func recordScan(at date: Date) throws {
+        scanDates.append(date)
+    }
+
+    func records() throws -> [AuditRecord] {
+        []
+    }
+
+    func latestScanDate() throws -> Date? {
+        scanDates.max()
+    }
+
+    func clear() throws {
         scanDates.removeAll()
     }
 }
