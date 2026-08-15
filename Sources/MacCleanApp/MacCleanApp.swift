@@ -1,50 +1,47 @@
 import MacCleanUI
 import SwiftUI
 
+@main
 @MainActor
 struct MacCleanApp: App {
-    @State private var model: AppModel?
+    @State private var statusItemController: StatusItemController?
     private let initializationFailure: String?
 
     init() {
-        do {
-            _model = State(initialValue: try LiveDependencies.makeAppModel())
-            initializationFailure = nil
-        } catch {
-            _model = State(initialValue: nil)
-            initializationFailure = String(describing: error)
+        guard SingleInstance.acquire() else {
+            // Another instance is already running: activate it and exit
+            // without creating a second status item or window.
+            SingleInstance.activateExistingInstance()
+            exit(0)
         }
+
+        let model: AppModel?
+        let failure: String?
+        do {
+            model = try LiveDependencies.makeAppModel()
+            failure = nil
+        } catch {
+            model = nil
+            failure = String(describing: error)
+        }
+        initializationFailure = failure
+        _statusItemController = State(
+            initialValue: StatusItemController(
+                model: model,
+                initializationFailure: failure
+            )
+        )
     }
 
     var body: some Scene {
-        MenuBarExtra("Mac Clean", systemImage: "externaldrive.badge.checkmark") {
-            if let model {
-                MenuBarRootView(model: model)
-                    .task {
-                        await model.performCatchUpScanIfDue()
-                    }
-            } else {
-                StartupFailureView(message: initializationFailure)
-                    .padding(16)
-                    .frame(width: 300)
-            }
-        }
-        .menuBarExtraStyle(.window)
-
-        Window("Mac Clean 详情", id: "details") {
-            if let model {
-                DetailView(model: model)
-            } else {
-                StartupFailureView(message: initializationFailure)
-                    .padding(24)
-                    .frame(minWidth: 480, minHeight: 260)
-            }
-        }
-        .defaultSize(width: 760, height: 560)
+        // The status item, the panel, and the details window are all owned by
+        // StatusItemController; this placeholder scene keeps the SwiftUI app
+        // running without opening any window at launch.
+        Settings { EmptyView() }
     }
 }
 
-private struct StartupFailureView: View {
+struct StartupFailureView: View {
     let message: String?
 
     var body: some View {
@@ -63,5 +60,3 @@ private struct StartupFailureView: View {
         }
     }
 }
-
-MacCleanApp.main()

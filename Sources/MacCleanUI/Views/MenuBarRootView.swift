@@ -24,30 +24,67 @@ struct EstimatedSpaceScaledText: View {
 @MainActor
 public struct MenuBarRootView: View {
     @Bindable private var model: AppModel
-    @Environment(\.openWindow) private var openWindow
+    @Environment(\.openDetailsWindow) private var openDetailsWindow
 
     public init(model: AppModel) {
         self.model = model
     }
 
     public var body: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            HStack(spacing: 8) {
-                Label("Mac Clean", systemImage: "externaldrive.badge.checkmark")
-                    .font(.headline)
+        VStack(alignment: .leading, spacing: 16) {
+            HStack(spacing: 10) {
+                Image(systemName: "checkmark.shield.fill")
+                    .font(.title2)
+                    .symbolRenderingMode(.hierarchical)
+                    .foregroundStyle(.green)
+
+                VStack(alignment: .leading, spacing: 1) {
+                    Text("Mac Clean")
+                        .font(.headline)
+                    Text("安全、透明地释放空间")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+
                 Spacer()
                 statusLabel
             }
 
-            VStack(alignment: .leading, spacing: 2) {
+            VStack(alignment: .leading, spacing: 4) {
                 EstimatedSpaceValueText(value: formattedEstimatedBytes)
-                Text("预计可释放空间")
+                Text("安全缓存可直接清理")
                     .font(.subheadline)
                     .foregroundStyle(.secondary)
             }
             .accessibilityElement(children: .combine)
             .accessibilityLabel("预计可释放空间")
             .accessibilityValue(formattedEstimatedBytes)
+
+            HStack(spacing: 0) {
+                compactMetric(
+                    title: "安全缓存",
+                    value: model.greenSummary,
+                    symbol: "checkmark.shield.fill",
+                    color: .green
+                )
+
+                Divider()
+                    .padding(.vertical, 6)
+
+                compactMetric(
+                    title: "待确认",
+                    value: model.yellowSummary,
+                    symbol: "exclamationmark.triangle.fill",
+                    color: .orange
+                )
+            }
+            .padding(.vertical, 8)
+            .background(Color(nsColor: .controlBackgroundColor))
+            .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+            .overlay {
+                RoundedRectangle(cornerRadius: 10, style: .continuous)
+                    .stroke(Color.primary.opacity(0.1), lineWidth: 1)
+            }
 
             Button {
                 Task { await model.scan() }
@@ -62,6 +99,7 @@ public struct MenuBarRootView: View {
                 }
             }
             .buttonStyle(.borderedProminent)
+            .controlSize(.large)
             .disabled(isScanDisabled)
             .accessibilityHint(scanAccessibilityHint)
 
@@ -81,24 +119,43 @@ public struct MenuBarRootView: View {
                 .foregroundStyle(.secondary)
             }
 
-            Divider()
-
-            LabeledContent("安全缓存", value: model.greenSummary)
-            LabeledContent("待确认项目", value: model.yellowSummary)
-
-            Divider()
-
             Button {
-                openWindow(id: "details")
+                openDetailsWindow()
             } label: {
-                Label("查看详情", systemImage: "list.bullet.rectangle")
+                Label("查看全部候选项", systemImage: "list.bullet.rectangle")
                     .frame(maxWidth: .infinity)
             }
             .buttonStyle(.bordered)
+            .controlSize(.large)
             .accessibilityHint("打开候选项详情窗口")
         }
-        .padding(16)
-        .frame(width: 300)
+        .padding(18)
+        .frame(width: 330)
+        .tint(.blue)
+    }
+
+    private func compactMetric(
+        title: String,
+        value: String,
+        symbol: String,
+        color: Color
+    ) -> some View {
+        HStack(spacing: 8) {
+            Image(systemName: symbol)
+                .symbolRenderingMode(.hierarchical)
+                .foregroundStyle(color)
+            VStack(alignment: .leading, spacing: 1) {
+                Text(title)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                Text(value)
+                    .font(.callout.weight(.semibold))
+            }
+            Spacer(minLength: 4)
+        }
+        .frame(maxWidth: .infinity)
+        .padding(.horizontal, 12)
+        .accessibilityElement(children: .combine)
     }
 
     private var formattedEstimatedBytes: String {

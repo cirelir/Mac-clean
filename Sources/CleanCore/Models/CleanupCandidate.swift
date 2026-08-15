@@ -1,7 +1,7 @@
 import Foundation
 
 public enum CandidateCategory: String, Codable, CaseIterable, Sendable {
-    case applicationCache, applicationLog, orphanResidual, packageManager, developerTool, reportOnly
+    case applicationCache, applicationLog, orphanResidual, packageManager, developerTool, systemData, reportOnly
 }
 
 public enum RiskLevel: String, Codable, CaseIterable, Sendable {

@@ -39,7 +39,8 @@ enum UITestFixtures {
         path: String = "/tmp/mac-clean-tests/com.example.Editor",
         id: UUID = UUID(),
         sizeBytes: UInt64 = 1_024,
-        sourceURL: URL? = nil
+        sourceURL: URL? = nil,
+        ownerBundleID: String? = "com.example.Editor"
     ) -> CleanupCandidate {
         let canonicalURL = URL(fileURLWithPath: path).standardizedFileURL
         let sourceURL = sourceURL ?? canonicalURL
@@ -72,7 +73,7 @@ enum UITestFixtures {
                 scannerID: "fixture-scanner",
                 ruleID: "fixture-rule",
                 ownerName: "Editor",
-                ownerBundleID: "com.example.Editor",
+                ownerBundleID: ownerBundleID,
                 explanation: "Fixture evidence"
             ),
             risk: risk,

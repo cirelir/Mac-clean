@@ -59,6 +59,7 @@ public struct CleanupResult: Hashable, Sendable {
 public actor CleanupExecutor: CleanupExecuting {
     private let validator: SafePathValidator
     private let hooks: CleanupExecutionHooks
+    private let trashDirectory: URL
     private var executionInProgress = false
     private var executionWaiters: [CheckedContinuation<Void, Never>] = []
 
@@ -69,6 +70,7 @@ public actor CleanupExecutor: CleanupExecuting {
     ) {
         self.validator = validator
         hooks = CleanupExecutionHooks()
+        trashDirectory = Self.defaultTrashDirectory()
         _ = fingerprinter
         _ = fileManager
     }
@@ -81,8 +83,28 @@ public actor CleanupExecutor: CleanupExecuting {
     ) {
         self.validator = validator
         self.hooks = hooks
+        trashDirectory = Self.defaultTrashDirectory()
         _ = fingerprinter
         _ = fileManager
+    }
+
+    init(
+        validator: SafePathValidator,
+        fingerprinter: any FileFingerprinting,
+        fileManager: FileManager,
+        hooks: CleanupExecutionHooks,
+        trashDirectory: URL
+    ) {
+        self.validator = validator
+        self.hooks = hooks
+        self.trashDirectory = trashDirectory
+        _ = fingerprinter
+        _ = fileManager
+    }
+
+    private static func defaultTrashDirectory() -> URL {
+        FileManager.default.homeDirectoryForCurrentUser
+            .appending(path: ".Trash", directoryHint: .isDirectory)
     }
 
     public func execute(_ plan: CleanupPlan) async -> CleanupResult {
@@ -122,12 +144,28 @@ public actor CleanupExecutor: CleanupExecuting {
             )
         }
 
-        let outcome = DescriptorTreeCleaner(hooks: hooks).deleteContents(
-            at: validatedPath.canonicalURL,
-            expectedFingerprint: item.expectedFingerprint,
-            action: item.action,
-            item: item
+        let cleaner = DescriptorTreeCleaner(
+            hooks: hooks,
+            trashDirectory: trashDirectory
         )
+        let outcome: DescriptorCleanupOutcome
+        switch item.action {
+        case .deleteContentsPreservingRoot:
+            outcome = cleaner.deleteContents(
+                at: validatedPath.canonicalURL,
+                expectedFingerprint: item.expectedFingerprint,
+                action: item.action,
+                item: item
+            )
+        case .moveToTrash:
+            outcome = cleaner.moveToTrash(
+                at: validatedPath.canonicalURL,
+                expectedFingerprint: item.expectedFingerprint,
+                item: item
+            )
+        case .packageManagerCommand, .reportOnly:
+            outcome = .skipped(.unsupportedAction)
+        }
 
         let status: CleanupItemStatus
         switch outcome {

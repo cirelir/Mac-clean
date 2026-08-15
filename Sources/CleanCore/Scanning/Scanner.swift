@@ -11,6 +11,8 @@ public enum DiscoveryKind: Hashable, Codable, Sendable {
     case rotatableLog(olderThanDays: Int)
     case orphanResidual(confidence: DiscoveryConfidence)
     case authoritativeUnusedDependency
+    case systemData
+    case developerData
     case unknown
 }
 

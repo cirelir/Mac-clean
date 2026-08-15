@@ -2,7 +2,7 @@ import Foundation
 import Testing
 @testable import CleanCore
 
-@Test func emitsInstalledBundleCacheAndReportsUnknownDirectoryAsRedEvidence() async throws {
+@Test func emitsInstalledBundleCacheAndReportsUnknownDirectoryAsInferredResidual() async throws {
     let fixture = try CacheFixture(entries: ["com.example.Editor": 2_048, "mystery-cache": 128])
     let scanner = ApplicationCacheScanner(
         cacheRoot: fixture.root,
@@ -16,11 +16,11 @@ import Testing
 
     #expect(discoveries.count == 2)
     #expect(discoveries.first { $0.evidence.ownerBundleID == "com.example.Editor" }?.kind == .regenerableApplicationCache)
-    #expect(discoveries.first { $0.sourceURL.lastPathComponent == "mystery-cache" }?.kind == .unknown)
+    #expect(discoveries.first { $0.sourceURL.lastPathComponent == "mystery-cache" }?.kind == .orphanResidual(confidence: .inferred))
     #expect(discoveries.first { $0.sourceURL.lastPathComponent == "mystery-cache" }?.evidence.ownerBundleID == nil)
 }
 
-@Test func cacheScannerUsesExactBundleIDMatchesAndOnlyEmitsImmediateChildren() async throws {
+@Test func cacheScannerMatchesBundleIDsCaseInsensitivelyAndOnlyEmitsImmediateChildren() async throws {
     let fixture = try CacheFixture(entries: ["com.example.Editor": 64])
     let nested = fixture.root
         .appending(path: "com.example.Editor")
@@ -38,8 +38,25 @@ import Testing
 
     #expect(discoveries.count == 1)
     #expect(discoveries[0].sourceURL.lastPathComponent == "com.example.Editor")
-    #expect(discoveries[0].kind == .unknown)
-    #expect(discoveries[0].evidence.ownerBundleID == nil)
+    #expect(discoveries[0].kind == .regenerableApplicationCache)
+    #expect(discoveries[0].evidence.ownerBundleID == "COM.EXAMPLE.EDITOR")
+}
+
+@Test func cacheScannerFuzzyMatchesUpdaterSubdirectoriesToInstalledApps() async throws {
+    let fixture = try CacheFixture(entries: ["com.microsoft.VSCode.ShipIt": 64])
+    let scanner = ApplicationCacheScanner(
+        cacheRoot: fixture.root,
+        validator: fixture.validator,
+        fingerprinter: SystemFileFingerprinter()
+    )
+
+    let discoveries = try await scanner.scan(
+        context: fixture.context(installed: ["com.microsoft.VSCode"])
+    )
+
+    let discovery = try #require(discoveries.first)
+    #expect(discovery.kind == .regenerableApplicationCache)
+    #expect(discovery.evidence.ownerBundleID == "com.microsoft.VSCode")
 }
 
 @Test func cacheScannerDoesNotClaimBundleOwnershipForARegularFile() async throws {
@@ -200,6 +217,59 @@ import Testing
         #expect(changedURL == target.standardizedFileURL)
     } catch {
         Issue.record("Expected identityChanged, got \(error)")
+    }
+}
+
+@Test func cacheScannerSkipsUnenumerableChildAndStillCompletes() async throws {
+    let fixture = try CacheFixture(entries: ["com.example.Editor": 2_048, "mystery-cache": 128])
+    let scanner = ApplicationCacheScanner(
+        cacheRoot: fixture.root,
+        validator: fixture.validator,
+        fingerprinter: SystemFileFingerprinter(),
+        directorySizer: UnenumerableChildSizer(blockedChild: "mystery-cache")
+    )
+
+    let discoveries = try await scanner.scan(
+        context: fixture.context(installed: ["com.example.Editor"])
+    )
+
+    #expect(discoveries.count == 1)
+    #expect(discoveries.first?.sourceURL.lastPathComponent == "com.example.Editor")
+    #expect(discoveries.first?.evidence.ownerBundleID == "com.example.Editor")
+}
+
+@Test func cacheScannerSkipsUnreadableChildDirectoryAndStillCompletes() async throws {
+    let fixture = try CacheFixture(entries: ["com.example.Editor": 2_048, "mystery-cache": 128])
+    let blocked = fixture.root.appending(path: "mystery-cache")
+    try FileManager.default.setAttributes([.posixPermissions: 0], ofItemAtPath: blocked.path)
+    defer {
+        try? FileManager.default.setAttributes(
+            [.posixPermissions: 0o700],
+            ofItemAtPath: blocked.path
+        )
+    }
+    let scanner = ApplicationCacheScanner(
+        cacheRoot: fixture.root,
+        validator: fixture.validator,
+        fingerprinter: SystemFileFingerprinter()
+    )
+
+    let discoveries = try await scanner.scan(
+        context: fixture.context(installed: ["com.example.Editor"])
+    )
+
+    #expect(discoveries.count == 1)
+    #expect(discoveries.first?.sourceURL.lastPathComponent == "com.example.Editor")
+}
+
+private struct UnenumerableChildSizer: DirectorySizing {
+    let blockedChild: String
+
+    func size(of url: URL) async throws -> UInt64 {
+        if url.lastPathComponent == blockedChild {
+            throw DirectorySizingError.cannotEnumerate(url)
+        }
+        return 1_024
     }
 }
 

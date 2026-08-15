@@ -60,6 +60,7 @@ public final class AppModel {
         public var failures: [ScannerFailure] = []
         public var lastScan: Date?
         public var errorMessage: String?
+        public var lastCleanupOutcomes: [String] = []
 
         public init() {}
     }
@@ -118,6 +119,7 @@ public final class AppModel {
         state.candidates = []
         state.failures = []
         state.errorMessage = nil
+        state.lastCleanupOutcomes = []
         currentScanID = nil
 
         do {
@@ -180,7 +182,8 @@ public final class AppModel {
         let pendingReviewCount = state.candidates.count { $0.risk == .yellow }
         let summary: CatchUpCleanupSummary
         if state.candidates.contains(where: { $0.risk == .green }) {
-            guard let cleanupSummary = await performGreenCleanup(
+            guard let cleanupSummary = await performCleanup(
+                confirmedIDs: [],
                 pendingReviewCount: pendingReviewCount
             ) else {
                 return nil
@@ -202,19 +205,34 @@ public final class AppModel {
 
     public func cleanGreenCandidates() async {
         guard !catchUpInProgress else { return }
-        _ = await performGreenCleanup(
+        _ = await performCleanup(
+            confirmedIDs: [],
             pendingReviewCount: state.candidates.count { $0.risk == .yellow }
         )
     }
 
-    private func performGreenCleanup(
+    /// Cleans green candidates plus the yellow candidates the user explicitly
+    /// selected for confirmation.
+    public func clean(candidateIDs: Set<UUID>) async {
+        guard !catchUpInProgress, state.phase == .results else { return }
+        _ = await performCleanup(
+            confirmedIDs: candidateIDs,
+            pendingReviewCount: state.candidates.count { $0.risk == .yellow }
+        )
+    }
+
+    private func performCleanup(
+        confirmedIDs: Set<UUID>,
         pendingReviewCount: Int
     ) async -> CatchUpCleanupSummary? {
         guard state.phase == .results, let currentScanID else { return nil }
 
         let candidates = state.candidates
         let scanID = currentScanID
-        guard candidates.contains(where: { $0.risk == .green }) else {
+        let hasWork = confirmedIDs.isEmpty
+            ? candidates.contains { $0.risk == .green }
+            : candidates.contains { confirmedIDs.contains($0.id) && $0.risk != .red }
+        guard hasWork else {
             return CatchUpCleanupSummary(
                 estimatedDeletedBytes: 0,
                 pendingReviewCount: pendingReviewCount
@@ -233,15 +251,29 @@ public final class AppModel {
         }
 
         let revalidatedCandidates = candidates.filter { candidate in
-            guard candidate.risk == .green else { return true }
-            guard let ownerBundleID = candidate.evidence.ownerBundleID else {
+            switch candidate.risk {
+            case .green:
+                guard let ownerBundleID = candidate.evidence.ownerBundleID else {
+                    // Owner-less system data (e.g. crash reports) has no
+                    // application that could have started running to protect.
+                    return true
+                }
+                return !latestInventory.runningBundleIDs.contains(ownerBundleID)
+            case .yellow:
+                guard confirmedIDs.contains(candidate.id) else {
+                    return false
+                }
+                guard let ownerBundleID = candidate.evidence.ownerBundleID else {
+                    return true
+                }
+                return !latestInventory.runningBundleIDs.contains(ownerBundleID)
+            case .red:
                 return false
             }
-            return !latestInventory.runningBundleIDs.contains(ownerBundleID)
         }
         let plan = dependencies.planner.plan(
             candidates: revalidatedCandidates,
-            confirmedIDs: [],
+            confirmedIDs: confirmedIDs,
             now: dependencies.now()
         )
         guard !plan.items.isEmpty else {
@@ -254,6 +286,21 @@ public final class AppModel {
         let completedAt = dependencies.now()
         let candidatesByID = Dictionary(uniqueKeysWithValues: candidates.map { ($0.id, $0) })
         var auditErrors: [String] = []
+
+        state.lastCleanupOutcomes = result.items.compactMap { item in
+            guard let candidate = candidatesByID[item.candidateID] else { return nil }
+            switch item.status {
+            case .success:
+                return "\(candidate.displayName)：已清理"
+            case .partial(_, let message):
+                return "\(candidate.displayName)：部分完成（\(message)）"
+            case .skipped(let reason):
+                return "\(candidate.displayName)：跳过（\(skipReasonText(reason))）"
+            case .failed(let message):
+                return "\(candidate.displayName)：失败（\(message)）"
+            }
+        }
+        appendCleanupLog(plan: plan, result: result, candidatesByID: candidatesByID)
 
         let protocolMismatch = cleanupProtocolMismatch(plan: plan, result: result)
         if let mismatch = protocolMismatch {
@@ -335,6 +382,55 @@ public final class AppModel {
         }
 
         return nil
+    }
+
+    /// Appends a diagnostic line for every cleanup attempt so a failed
+    /// move-to-trash can be inspected at ~/Library/Logs/MacCleanCleanup.log.
+    private func appendCleanupLog(
+        plan: CleanupPlan,
+        result: CleanupResult,
+        candidatesByID: [UUID: CleanupCandidate]
+    ) {
+        var lines = [
+            "[\(Date().formatted(date: .abbreviated, time: .standard))] plan=\(plan.items.count) result=\(result.items.count)"
+        ]
+        for item in result.items {
+            let name = candidatesByID[item.candidateID]?.displayName
+                ?? item.candidateID.uuidString
+            let status: String
+            switch item.status {
+            case .success:
+                status = "success"
+            case .partial(_, let message):
+                status = "partial: \(message)"
+            case .skipped(let reason):
+                status = "skipped: \(reason.rawValue)"
+            case .failed(let message):
+                status = "failed: \(message)"
+            }
+            lines.append("  \(name): \(status)")
+        }
+        let url = FileManager.default.homeDirectoryForCurrentUser
+            .appending(path: "Library/Logs/MacCleanCleanup.log", directoryHint: .isDirectory)
+        guard let data = (lines.joined(separator: "\n") + "\n").data(using: .utf8) else {
+            return
+        }
+        if FileManager.default.fileExists(atPath: url.path) {
+            guard let handle = try? FileHandle(forWritingTo: url) else { return }
+            defer { try? handle.close() }
+            _ = try? handle.seekToEnd()
+            try? handle.write(contentsOf: data)
+        } else {
+            try? data.write(to: url)
+        }
+    }
+
+    private func skipReasonText(_ reason: CleanupSkipReason) -> String {
+        switch reason {
+        case .fingerprintChanged: "对象已被替换"
+        case .pathRejected: "路径校验未通过"
+        case .unsupportedAction: "不支持的操作"
+        }
     }
 
     private func auditRecord(

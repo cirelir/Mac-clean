@@ -32,7 +32,7 @@ import Testing
     #expect(report.failures.isEmpty)
 }
 
-@Test func coordinatorReportsApplicationCacheTraversalFailureWithoutGreenCandidate() async throws {
+@Test func coordinatorDoesNotYieldGreenCandidateWhenCacheTraversalFails() async throws {
     let root = FileManager.default.temporaryDirectory.appending(path: UUID().uuidString)
     let cache = root.appending(path: "com.example.Editor")
     let blocked = cache.appending(path: "blocked")
@@ -58,8 +58,11 @@ import Testing
         context: CoreTestFixtures.context(installed: ["com.example.Editor"])
     )
 
+    // A cache whose contents cannot be fully enumerated is skipped entirely:
+    // it never becomes a candidate (so nothing can be deleted), and the
+    // remaining scan still completes without a scanner failure.
     #expect(report.candidates.isEmpty)
-    #expect(report.failures.map(\.scannerID) == ["application-cache"])
+    #expect(report.failures.isEmpty)
 }
 
 private struct FixtureScanner: CleanCore.Scanner {

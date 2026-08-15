@@ -82,36 +82,136 @@ import Testing
     #expect(FileManager.default.fileExists(atPath: payload.path))
 }
 
-@Test func executorFailsClosedForUnsupportedActions() async throws {
+@Test func executorFailsClosedForUnsupportedPackageManagerActions() async throws {
     let fixture = try CleanupFixture.greenCache()
-    let secondTarget = fixture.root.appending(path: "package-cache")
-    try FileManager.default.createDirectory(at: secondTarget, withIntermediateDirectories: true)
-    try Data([0x50]).write(to: secondTarget.appending(path: "package.bin"))
-    let fingerprinter = SystemFileFingerprinter()
-    let moveToTrash = CoreTestFixtures.candidate(
-        risk: .yellow,
-        path: fixture.target.path,
-        fingerprint: try fingerprinter.fingerprint(at: fixture.target)
-    )
     let packageManager = CoreTestFixtures.candidate(
         risk: .green,
-        path: secondTarget.path,
-        fingerprint: try fingerprinter.fingerprint(at: secondTarget),
+        path: fixture.target.path,
+        fingerprint: fixture.candidate.fingerprint,
         action: .packageManagerCommand
     )
-    let plan = CleanupPlanner().plan(
-        candidates: [moveToTrash, packageManager],
-        confirmedIDs: [moveToTrash.id]
-    )
+    let plan = CleanupPlanner().plan(candidates: [packageManager], confirmedIDs: [])
 
     let result = await fixture.executor.execute(plan)
 
-    #expect(result.items.map(\.status) == [
-        .skipped(.unsupportedAction),
-        .skipped(.unsupportedAction)
-    ])
+    #expect(result.items.map(\.status) == [.skipped(.unsupportedAction)])
     #expect(FileManager.default.fileExists(atPath: fixture.target.appending(path: "cache.bin").path))
-    #expect(FileManager.default.fileExists(atPath: secondTarget.appending(path: "package.bin").path))
+}
+
+@Test func executorMovesValidatedDirectoryIntoTrash() async throws {
+    let root = try makeTemporaryDirectory()
+    let trash = try makeTemporaryDirectory()
+    defer {
+        try? FileManager.default.removeItem(at: root)
+        try? FileManager.default.removeItem(at: trash)
+    }
+    let target = root.appending(path: "Google")
+    try FileManager.default.createDirectory(at: target, withIntermediateDirectories: true)
+    try Data([0x47, 0x4F]).write(to: target.appending(path: "residual.bin"))
+    let fingerprinter = SystemFileFingerprinter()
+    let candidate = CoreTestFixtures.candidate(
+        risk: .yellow,
+        path: target.path,
+        fingerprint: try fingerprinter.fingerprint(at: target)
+    )
+    let executor = CleanupExecutor(
+        validator: SafePathValidator(allowedRoots: [root], forbiddenExactPaths: []),
+        fingerprinter: fingerprinter,
+        fileManager: .default,
+        hooks: CleanupExecutionHooks(),
+        trashDirectory: trash
+    )
+
+    let result = await executor.execute(
+        CleanupPlanner().plan(candidates: [candidate], confirmedIDs: [candidate.id])
+    )
+
+    #expect(result.items.first?.status == .success(estimatedDeletedBytes: candidate.sizeBytes))
+    #expect(!FileManager.default.fileExists(atPath: target.path))
+    #expect(FileManager.default.fileExists(atPath: trash.appending(path: "Google").path))
+    #expect(try Data(contentsOf: trash.appending(path: "Google").appending(path: "residual.bin")) == Data([0x47, 0x4F]))
+}
+
+@Test func executorCleansDirectoryWhoseContentsChangedSinceScan() async throws {
+    let fixture = try CleanupFixture.greenCache(payload: Data([0x41]))
+    // An app writes new files between scan and cleanup: the directory object
+    // is unchanged (same device/inode), so cleanup must still proceed.
+    try Data([0x42]).write(to: fixture.target.appending(path: "added-later.bin"))
+    let plan = CleanupPlanner().plan(candidates: [fixture.candidate], confirmedIDs: [])
+
+    let result = await fixture.executor.execute(plan)
+
+    #expect(result.items.first?.status == .success(estimatedDeletedBytes: 2))
+    #expect(try FileManager.default.contentsOfDirectory(atPath: fixture.target.path).isEmpty)
+}
+
+@Test func executorMovesToTrashEvenWhenContentsChangedSinceScan() async throws {
+    let root = try makeTemporaryDirectory()
+    let trash = try makeTemporaryDirectory()
+    defer {
+        try? FileManager.default.removeItem(at: root)
+        try? FileManager.default.removeItem(at: trash)
+    }
+    let target = root.appending(path: "Residual")
+    try FileManager.default.createDirectory(at: target, withIntermediateDirectories: true)
+    try Data([0x41]).write(to: target.appending(path: "residual.bin"))
+    let fingerprinter = SystemFileFingerprinter()
+    let candidate = CoreTestFixtures.candidate(
+        risk: .yellow,
+        path: target.path,
+        fingerprint: try fingerprinter.fingerprint(at: target)
+    )
+    try Data([0x42]).write(to: target.appending(path: "added-later.bin"))
+    let executor = CleanupExecutor(
+        validator: SafePathValidator(allowedRoots: [root], forbiddenExactPaths: []),
+        fingerprinter: fingerprinter,
+        fileManager: .default,
+        hooks: CleanupExecutionHooks(),
+        trashDirectory: trash
+    )
+
+    let result = await executor.execute(
+        CleanupPlanner().plan(candidates: [candidate], confirmedIDs: [candidate.id])
+    )
+
+    #expect(result.items.first?.status == .success(estimatedDeletedBytes: candidate.sizeBytes))
+    #expect(!FileManager.default.fileExists(atPath: target.path))
+    #expect(FileManager.default.fileExists(atPath: trash.appending(path: "Residual").path))
+}
+
+@Test func executorMovesToTrashIsSkippedWhenFingerprintChanged() async throws {
+    let root = try makeTemporaryDirectory()
+    let trash = try makeTemporaryDirectory()
+    defer {
+        try? FileManager.default.removeItem(at: root)
+        try? FileManager.default.removeItem(at: trash)
+    }
+    let target = root.appending(path: "Residual")
+    try FileManager.default.createDirectory(at: target, withIntermediateDirectories: true)
+    try Data([0x41]).write(to: target.appending(path: "residual.bin"))
+    let fingerprinter = SystemFileFingerprinter()
+    let candidate = CoreTestFixtures.candidate(
+        risk: .yellow,
+        path: target.path,
+        fingerprint: try fingerprinter.fingerprint(at: target)
+    )
+    try FileManager.default.moveItem(at: target, to: root.appending(path: "moved-original"))
+    try FileManager.default.createDirectory(at: target, withIntermediateDirectories: true)
+    try Data([0x42]).write(to: target.appending(path: "replacement.bin"))
+    let executor = CleanupExecutor(
+        validator: SafePathValidator(allowedRoots: [root], forbiddenExactPaths: []),
+        fingerprinter: fingerprinter,
+        fileManager: .default,
+        hooks: CleanupExecutionHooks(),
+        trashDirectory: trash
+    )
+
+    let result = await executor.execute(
+        CleanupPlanner().plan(candidates: [candidate], confirmedIDs: [candidate.id])
+    )
+
+    #expect(result.items.first?.status == .skipped(.fingerprintChanged))
+    #expect(FileManager.default.fileExists(atPath: target.appending(path: "replacement.bin").path))
 }
 
 @Test func executorIsolatesItemFailureAndContinuesWithTheNextPlanItem() async throws {

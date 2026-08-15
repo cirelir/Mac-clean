@@ -5,17 +5,22 @@ public struct CleanupPlanItem: Hashable, Sendable {
     public let canonicalURL: URL
     public let expectedFingerprint: FileFingerprint
     public let action: CleanupAction
+    /// Estimated reclaimable bytes recorded at scan time; reported by
+    /// move-to-trash outcomes that move the whole directory at once.
+    public let estimatedBytes: UInt64
 
     public init(
         candidateID: UUID,
         canonicalURL: URL,
         expectedFingerprint: FileFingerprint,
-        action: CleanupAction
+        action: CleanupAction,
+        estimatedBytes: UInt64 = 0
     ) {
         self.candidateID = candidateID
         self.canonicalURL = canonicalURL
         self.expectedFingerprint = expectedFingerprint
         self.action = action
+        self.estimatedBytes = estimatedBytes
     }
 }
 
@@ -50,7 +55,8 @@ public struct CleanupPlanner: Sendable {
                     candidateID: $0.id,
                     canonicalURL: $0.canonicalURL,
                     expectedFingerprint: $0.fingerprint,
-                    action: $0.proposedAction
+                    action: $0.proposedAction,
+                    estimatedBytes: $0.sizeBytes
                 )
             }
 

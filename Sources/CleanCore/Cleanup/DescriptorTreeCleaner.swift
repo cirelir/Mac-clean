@@ -10,6 +10,7 @@ enum DescriptorCleanupOutcome {
 
 struct DescriptorTreeCleaner {
     let hooks: CleanupExecutionHooks
+    let trashDirectory: URL
 
     func deleteContents(
         at rootURL: URL,
@@ -35,7 +36,7 @@ struct DescriptorTreeCleaner {
                 message: posixMessage("fstat root", path: rootURL.path, code: errno)
             )
         }
-        guard fingerprint(from: rootStatus) == expectedFingerprint else {
+        guard sameObject(fingerprint(from: rootStatus), expectedFingerprint) else {
             return .skipped(.fingerprintChanged)
         }
         guard action == .deleteContentsPreservingRoot else {
@@ -62,6 +63,176 @@ struct DescriptorTreeCleaner {
             }
             return .failed(message: message)
         }
+    }
+
+    /// Moves the whole validated root directory into the trash with a single
+    /// descriptor-relative rename, preserving the original object for recovery.
+    func moveToTrash(
+        at rootURL: URL,
+        expectedFingerprint: FileFingerprint,
+        item: CleanupPlanItem
+    ) -> DescriptorCleanupOutcome {
+        let rootDescriptor: Int32
+        do {
+            rootDescriptor = try openCanonicalDirectory(at: rootURL)
+        } catch DescriptorCleanupError.pathRejected {
+            return .skipped(.pathRejected)
+        } catch DescriptorCleanupError.posix(_, _, let code) where code == ENOENT {
+            return .skipped(.fingerprintChanged)
+        } catch {
+            return .failed(message: String(describing: error))
+        }
+        defer { Darwin.close(rootDescriptor) }
+
+        var rootStatus = stat()
+        guard Darwin.fstat(rootDescriptor, &rootStatus) == 0 else {
+            return .failed(
+                message: posixMessage("fstat root", path: rootURL.path, code: errno)
+            )
+        }
+        guard sameObject(fingerprint(from: rootStatus), expectedFingerprint) else {
+            return .skipped(.fingerprintChanged)
+        }
+        guard item.action == .moveToTrash else {
+            return .skipped(.unsupportedAction)
+        }
+
+        do {
+            try hooks.afterRootOpenedAndFingerprinted?(item)
+
+            let parentDescriptor = try openCanonicalDirectory(
+                at: rootURL.deletingLastPathComponent()
+            )
+            defer { Darwin.close(parentDescriptor) }
+
+            // The rename below is name-based, so re-check that the parent entry
+            // still names the exact object we opened and fingerprinted.
+            let name = rootURL.lastPathComponent
+            var entryStatus = stat()
+            guard fstatat(
+                parentDescriptor,
+                name,
+                &entryStatus,
+                AT_SYMLINK_NOFOLLOW
+            ) == 0 else {
+                throw DescriptorCleanupError.posix(
+                    operation: "fstatat before move to trash",
+                    path: rootURL.path,
+                    code: errno
+                )
+            }
+            guard sameObjectAndType(entryStatus, rootStatus) else {
+                throw DescriptorCleanupError.identityChanged(path: rootURL.path)
+            }
+
+            // For the real ~/.Trash, prefer the system trash API: it handles
+            // all macOS trash specifics internally and avoids opening the trash
+            // directory ourselves (which transiently fails with EPERM on the
+            // real ~/.Trash). The manual rename path is kept for injected
+            // trash directories (tests) and as a fallback.
+            let isDefaultTrash = trashDirectory.standardizedFileURL.path
+                == Self.defaultTrashDirectory().standardizedFileURL.path
+            if isDefaultTrash {
+                do {
+                    try FileManager.default.trashItem(
+                        at: rootURL,
+                        resultingItemURL: nil
+                    )
+                    return .success(estimatedDeletedBytes: item.estimatedBytes)
+                } catch {
+                    return renameIntoTrashFallback(
+                        rootURL: rootURL,
+                        name: name,
+                        parentDescriptor: parentDescriptor,
+                        estimatedBytes: item.estimatedBytes,
+                        primaryError: error
+                    )
+                }
+            }
+            return renameIntoTrashFallback(
+                rootURL: rootURL,
+                name: name,
+                parentDescriptor: parentDescriptor,
+                estimatedBytes: item.estimatedBytes,
+                primaryError: nil
+            )
+        } catch {
+            return .failed(message: String(describing: error))
+        }
+    }
+
+    private static func defaultTrashDirectory() -> URL {
+        FileManager.default.homeDirectoryForCurrentUser
+            .appending(path: ".Trash", directoryHint: .isDirectory)
+    }
+
+    /// Moves the root into the configured trash directory with a manual
+    /// descriptor-relative rename, used for injected trash directories and as
+    /// a fallback when the system trash API is unavailable.
+    private func renameIntoTrashFallback(
+        rootURL: URL,
+        name: String,
+        parentDescriptor: Int32,
+        estimatedBytes: UInt64,
+        primaryError: Error?
+    ) -> DescriptorCleanupOutcome {
+        do {
+            let trashDescriptor = try openTrashDirectory()
+            defer { Darwin.close(trashDescriptor) }
+            let targetName = try availableTrashName(for: name, in: trashDescriptor)
+            guard renameat(
+                parentDescriptor,
+                name,
+                trashDescriptor,
+                targetName
+            ) == 0 else {
+                throw DescriptorCleanupError.posix(
+                    operation: "renameat into trash",
+                    path: rootURL.path,
+                    code: errno
+                )
+            }
+            return .success(estimatedDeletedBytes: estimatedBytes)
+        } catch {
+            let primary = primaryError.map { "trashItem: \(String(describing: $0)); " } ?? ""
+            return .failed(
+                message: primary + "rename fallback: \(String(describing: error))"
+            )
+        }
+    }
+
+    /// The real ~/.Trash directory can be briefly locked by the system (e.g.
+    /// while Finder rebuilds it after emptying the trash), which surfaces as a
+    /// transient EPERM on open. Retry a few times before giving up.
+    private func openTrashDirectory() throws -> Int32 {
+        var lastError: Error?
+        for attempt in 0..<3 {
+            do {
+                try FileManager.default.createDirectory(
+                    at: trashDirectory,
+                    withIntermediateDirectories: true
+                )
+                return try openCanonicalDirectory(at: trashDirectory)
+            } catch {
+                lastError = error
+                if attempt < 2 {
+                    Thread.sleep(forTimeInterval: 0.2)
+                }
+            }
+        }
+        throw lastError ?? DescriptorCleanupError.pathRejected
+    }
+
+    private func availableTrashName(
+        for preferredName: String,
+        in trashDescriptor: Int32
+    ) throws -> String {
+        let existing = Set(try entryNames(in: trashDescriptor, relativePath: "~/.Trash"))
+        guard !existing.contains(preferredName) else {
+            let stamp = Int(Date().timeIntervalSince1970)
+            return "\(preferredName) \(stamp)"
+        }
+        return preferredName
     }
 
     private func openCanonicalDirectory(at url: URL) throws -> Int32 {
@@ -325,6 +496,15 @@ struct DescriptorTreeCleaner {
         return names.sorted()
     }
 
+    /// Object identity (device + inode) is what guarantees we act on the same
+    /// object as scanned. A directory's own size/mtime change constantly as
+    /// apps write inside it, so requiring full fingerprint equality would make
+    /// every real-world cleanup flaky; an object that was deleted and replaced
+    /// gets a new inode and is rejected here.
+    private func sameObject(_ first: FileFingerprint, _ second: FileFingerprint) -> Bool {
+        first.deviceID == second.deviceID && first.fileID == second.fileID
+    }
+
     private func fingerprint(from value: stat) -> FileFingerprint {
         FileFingerprint(
             deviceID: UInt64(value.st_dev),
@@ -373,6 +553,7 @@ private enum DescriptorCleanupError: Error, CustomStringConvertible {
     case crossDeviceBoundary(path: String)
     case invalidEntryName(path: String)
     case estimatedSizeOverflow
+    case trashItemFailed(path: String, detail: String)
 
     var description: String {
         switch self {
@@ -388,6 +569,8 @@ private enum DescriptorCleanupError: Error, CustomStringConvertible {
             return "Refused an entry name that is not valid UTF-8 under: \(path)"
         case .estimatedSizeOverflow:
             return "Estimated deleted byte count overflowed UInt64"
+        case .trashItemFailed(let path, let detail):
+            return "Move to trash failed for \(path): \(detail)"
         }
     }
 }

@@ -71,7 +71,8 @@ import Testing
             candidateID: id,
             canonicalURL: URL(fileURLWithPath: path),
             expectedFingerprint: fingerprint,
-            action: .deleteContentsPreservingRoot
+            action: .deleteContentsPreservingRoot,
+            estimatedBytes: 4_096
         )
     ])
 }

@@ -34,8 +34,18 @@ import Testing
     #expect(try RiskClassifier().classify(item, context: CoreTestFixtures.context()).risk == .yellow)
 }
 
-@Test func inferredOrphanResidualIsRedAndReportOnly() throws {
+@Test func inferredOrphanResidualIsYellowAndRequiresConfirmation() throws {
     let item = CoreTestFixtures.discovery(kind: .orphanResidual(confidence: .inferred))
+
+    let candidate = try RiskClassifier().classify(item, context: CoreTestFixtures.context())
+
+    #expect(candidate.risk == .yellow)
+    #expect(candidate.category == .orphanResidual)
+    #expect(candidate.proposedAction == .moveToTrash)
+}
+
+@Test func unknownDiscoveryIsRedAndReportOnly() throws {
+    let item = CoreTestFixtures.discovery(kind: .unknown)
 
     let candidate = try RiskClassifier().classify(item, context: CoreTestFixtures.context())
 
@@ -43,8 +53,52 @@ import Testing
     #expect(candidate.proposedAction == .reportOnly)
 }
 
-@Test func unknownDiscoveryIsRedAndReportOnly() throws {
-    let item = CoreTestFixtures.discovery(kind: .unknown)
+@Test func systemDataIsGreenWithoutOwner() throws {
+    let item = CoreTestFixtures.discovery(kind: .systemData, ownerBundleID: nil)
+
+    let candidate = try RiskClassifier().classify(item, context: CoreTestFixtures.context())
+
+    #expect(candidate.risk == .green)
+    #expect(candidate.category == .systemData)
+    #expect(candidate.proposedAction == .deleteContentsPreservingRoot)
+}
+
+@Test func systemDataIsGreenEvenWhenOwnerLooksRunning() throws {
+    let item = CoreTestFixtures.discovery(kind: .systemData, ownerBundleID: nil)
+    let context = CoreTestFixtures.context(running: ["com.example.Editor"])
+
+    let candidate = try RiskClassifier().classify(item, context: context)
+
+    #expect(candidate.risk == .green)
+    #expect(candidate.category == .systemData)
+}
+
+@Test func developerDataIsGreenWhenToolInstalledAndStopped() throws {
+    let item = CoreTestFixtures.discovery(kind: .developerData)
+    let context = CoreTestFixtures.context(installed: ["com.example.Editor"])
+
+    let candidate = try RiskClassifier().classify(item, context: context)
+
+    #expect(candidate.risk == .green)
+    #expect(candidate.category == .developerTool)
+    #expect(candidate.proposedAction == .deleteContentsPreservingRoot)
+}
+
+@Test func developerDataIsRedWhenToolIsRunning() throws {
+    let item = CoreTestFixtures.discovery(kind: .developerData)
+    let context = CoreTestFixtures.context(
+        installed: ["com.example.Editor"],
+        running: ["com.example.Editor"]
+    )
+
+    let candidate = try RiskClassifier().classify(item, context: context)
+
+    #expect(candidate.risk == .red)
+    #expect(candidate.proposedAction == .reportOnly)
+}
+
+@Test func developerDataIsRedWhenToolNotInstalled() throws {
+    let item = CoreTestFixtures.discovery(kind: .developerData)
 
     let candidate = try RiskClassifier().classify(item, context: CoreTestFixtures.context())
 
@@ -125,7 +179,7 @@ import Testing
     #expect(candidate.proposedAction == .reportOnly)
 }
 
-@Test func missingOwnerDowngradesAuthoritativeOrphanResidual() throws {
+@Test func ownerlessAuthoritativeOrphanResidualIsYellow() throws {
     let item = CoreTestFixtures.discovery(
         kind: .orphanResidual(confidence: .authoritative),
         ownerBundleID: nil
@@ -133,8 +187,20 @@ import Testing
 
     let candidate = try RiskClassifier().classify(item, context: CoreTestFixtures.context())
 
-    #expect(candidate.risk == .red)
-    #expect(candidate.proposedAction == .reportOnly)
+    #expect(candidate.risk == .yellow)
+    #expect(candidate.proposedAction == .moveToTrash)
+}
+
+@Test func ownerlessInferredOrphanResidualIsYellow() throws {
+    let item = CoreTestFixtures.discovery(
+        kind: .orphanResidual(confidence: .inferred),
+        ownerBundleID: nil
+    )
+
+    let candidate = try RiskClassifier().classify(item, context: CoreTestFixtures.context())
+
+    #expect(candidate.risk == .yellow)
+    #expect(candidate.proposedAction == .moveToTrash)
 }
 
 @Test func runningOwnerDowngradesAuthoritativeUnusedDependency() throws {

@@ -83,20 +83,30 @@ import Testing
         candidate: candidate,
         fileManager: .default
     )
+    let initialSnapshot = try #require(state.snapshot)
 
-    #expect(state.snapshot.revealState == .unavailable(.missing))
-    #expect(!state.snapshot.isEnabled)
-    #expect(state.snapshot.accessibilityHint == "路径不存在或已被清理，无法在 Finder 中显示。")
+    #expect(initialSnapshot.revealState == .unavailable(.missing))
+    #expect(!state.isEnabled)
+    #expect(state.accessibilityHint == "路径不存在或已被清理，无法在 Finder 中显示。")
 
     try Data().write(to: url)
     defer { try? FileManager.default.removeItem(at: url) }
 
-    #expect(!state.snapshot.isEnabled)
+    #expect(!state.isEnabled)
     state.refresh(candidate: candidate, fileManager: .default)
+    let refreshedSnapshot = try #require(state.snapshot)
 
-    #expect(state.snapshot.revealState == .available(candidate.canonicalURL))
-    #expect(state.snapshot.isEnabled)
-    #expect(state.snapshot.accessibilityHint == "在 Finder 中选中此项目。")
+    #expect(refreshedSnapshot.revealState == .available(candidate.canonicalURL))
+    #expect(state.isEnabled)
+    #expect(state.accessibilityHint == "在 Finder 中选中此项目。")
+}
+
+@Test @MainActor func finderAvailabilityCanDeferFileSystemChecksUntilExpansion() {
+    let state = FinderAvailabilityRefreshState()
+
+    #expect(state.snapshot == nil)
+    #expect(!state.isEnabled)
+    #expect(state.accessibilityHint == "展开详情后检查 Finder 位置是否可用。")
 }
 
 private final class PresentationInaccessibleFileManager: FileManager, @unchecked Sendable {

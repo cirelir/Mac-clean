@@ -390,6 +390,68 @@ private func malformedCleanupResult(
     }
 }
 
+@Test @MainActor func greenOwnerlessSystemDataIsStillPlannedForCleanup() async {
+    let systemData = UITestFixtures.candidate(risk: .green, ownerBundleID: nil)
+    let firstReport = ScanReport(candidates: [systemData], failures: [])
+    let emptyReport = UITestFixtures.scanReport(candidateCount: 0, failureCount: 0)
+    let coordinator = RecordingScanCoordinator(reports: [firstReport, emptyReport])
+    let executor = StubCleanupExecutor()
+    let model = AppModel(
+        dependencies: .fixture(coordinator: coordinator, cleanupExecutor: executor)
+    )
+    await model.scan()
+
+    await model.cleanGreenCandidates()
+
+    let plans = await executor.plans
+    #expect(plans.count == 1)
+    #expect(plans.first?.items.map(\.candidateID) == [systemData.id])
+    #expect(model.state.phase == .results)
+}
+
+@Test @MainActor func cleanConfirmedYellowPlansSelectedItemsAlongsideGreen() async {
+    let green = UITestFixtures.candidate(risk: .green)
+    let yellow = UITestFixtures.candidate(risk: .yellow)
+    let unconfirmedYellow = UITestFixtures.candidate(risk: .yellow)
+    let firstReport = ScanReport(
+        candidates: [green, yellow, unconfirmedYellow],
+        failures: []
+    )
+    let emptyReport = UITestFixtures.scanReport(candidateCount: 0, failureCount: 0)
+    let coordinator = RecordingScanCoordinator(reports: [firstReport, emptyReport])
+    let executor = StubCleanupExecutor()
+    let model = AppModel(
+        dependencies: .fixture(coordinator: coordinator, cleanupExecutor: executor)
+    )
+    await model.scan()
+
+    await model.clean(candidateIDs: [yellow.id])
+
+    let plans = await executor.plans
+    #expect(plans.count == 1)
+    #expect(plans.first?.items.map(\.candidateID) == [green.id, yellow.id])
+    #expect(coordinator.scanCount == 2)
+    #expect(model.state.phase == .results)
+}
+
+@Test @MainActor func cleanWithoutSelectionCleansOnlyGreenCandidates() async {
+    let green = UITestFixtures.candidate(risk: .green)
+    let yellow = UITestFixtures.candidate(risk: .yellow)
+    let firstReport = ScanReport(candidates: [green, yellow], failures: [])
+    let emptyReport = UITestFixtures.scanReport(candidateCount: 0, failureCount: 0)
+    let coordinator = RecordingScanCoordinator(reports: [firstReport, emptyReport])
+    let executor = StubCleanupExecutor()
+    let model = AppModel(
+        dependencies: .fixture(coordinator: coordinator, cleanupExecutor: executor)
+    )
+    await model.scan()
+
+    await model.clean(candidateIDs: [])
+
+    let plans = await executor.plans
+    #expect(plans.first?.items.map(\.candidateID) == [green.id])
+}
+
 @Test @MainActor func summariesCountRiskLevelsAndEstimateOnlyGreenBytes() async {
     let report = ScanReport(
         candidates: [
