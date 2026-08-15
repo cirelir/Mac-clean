@@ -25,6 +25,7 @@ struct EstimatedSpaceScaledText: View {
 public struct MenuBarRootView: View {
     @Bindable private var model: AppModel
     @Environment(\.openDetailsWindow) private var openDetailsWindow
+    @Environment(AppearanceStore.self) private var appearanceStore
 
     public init(model: AppModel) {
         self.model = model
@@ -128,10 +129,31 @@ public struct MenuBarRootView: View {
             .buttonStyle(.bordered)
             .controlSize(.large)
             .accessibilityHint("打开候选项详情窗口")
+
+            Divider()
+
+            HStack(spacing: 8) {
+                Label("外观", systemImage: "circle.lefthalf.filled")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+
+                Spacer()
+
+                Picker("外观模式", selection: Bindable(appearanceStore).preference) {
+                    ForEach(AppearancePreference.allCases) { mode in
+                        Text(mode.title).tag(mode)
+                    }
+                }
+                .pickerStyle(.menu)
+                .labelsHidden()
+                .frame(width: 120)
+                .accessibilityLabel("外观模式")
+            }
         }
         .padding(18)
         .frame(width: 330)
         .tint(.blue)
+        .preferredColorScheme(appearanceStore.preference.colorScheme)
     }
 
     private func compactMetric(

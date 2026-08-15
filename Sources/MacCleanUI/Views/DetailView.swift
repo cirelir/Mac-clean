@@ -72,6 +72,7 @@ private struct CandidateSection: Identifiable {
 @MainActor
 public struct DetailView: View {
     @Bindable private var model: AppModel
+    @Environment(AppearanceStore.self) private var appearanceStore
     @State private var searchText = ""
     @State private var selectedIDs: Set<UUID> = []
     @State private var riskFilter: CandidateRiskFilter = .all
@@ -115,9 +116,10 @@ public struct DetailView: View {
             minWidth: 920,
             idealWidth: 1_100,
             minHeight: 640,
-            idealHeight: 760
+            idealHeight: contentIdealHeight
         )
         .background(Color(nsColor: .windowBackgroundColor))
+        .preferredColorScheme(appearanceStore.preference.colorScheme)
     }
 
     private var header: some View {
@@ -279,7 +281,13 @@ public struct DetailView: View {
                 }
             }
             .pickerStyle(.segmented)
-            .frame(width: 520)
+            // Segmented pickers reserve a ~60pt slot for the picker label even
+            // though the style never draws it, which pushes the control off the
+            // leading edge. Hiding the label keeps the control flush with the
+            // list container below; the accessibility label is re-applied.
+            .labelsHidden()
+            .accessibilityLabel("风险筛选")
+            .frame(width: 520, alignment: .leading)
 
             Spacer(minLength: 24)
 
@@ -398,6 +406,42 @@ public struct DetailView: View {
         let contentHeight = CGFloat(rowCount) * 65
             + CGFloat(sections.count) * 28
         return min(max(contentHeight, 180), 520)
+    }
+
+    /// Ideal window height for the current content, so the details window can
+    /// auto-size to what is actually displayed instead of a fixed height.
+    ///
+    /// The values mirror the layout metrics below: header top/bottom padding
+    /// (38/22), header spacing (38), the headline row (~84), the summary strip
+    /// (76 + 16 vertical padding = 108), filter bar (36 + 14 + 14 = 64), the
+    /// divider (1), the list container chrome (33 header + 1 divider + 16
+    /// bottom padding = 50), and the cleanup footer (~58).
+    private var contentIdealHeight: CGFloat {
+        var headerHeight: CGFloat = 84 + 38 + 108
+        if model.state.errorMessage != nil {
+            headerHeight += 38 + 18
+        }
+        if !model.state.failures.isEmpty {
+            headerHeight += 38 + disclosureIdealHeight(lineCount: model.state.failures.count)
+        }
+        if !model.state.lastCleanupOutcomes.isEmpty {
+            headerHeight += 38 + disclosureIdealHeight(lineCount: model.state.lastCleanupOutcomes.count)
+        }
+        headerHeight += 38 + 22
+
+        let contentHeight = candidateSections.isEmpty
+            ? 210 // empty-state placeholder (ContentUnavailableView)
+            : 50 + candidateListIdealHeight(candidateSections)
+
+        return max(
+            640,
+            headerHeight + 64 + 1 + contentHeight + 58
+        )
+    }
+
+    private func disclosureIdealHeight(lineCount: Int) -> CGFloat {
+        let visibleLines = CGFloat(min(max(lineCount, 0), 4))
+        return 20 + 6 + visibleLines * 15
     }
 
     private var candidateIDs: [UUID] {

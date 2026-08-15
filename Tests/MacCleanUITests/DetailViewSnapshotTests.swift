@@ -81,6 +81,7 @@ import Testing
 
     let hostingView = NSHostingView(
         rootView: DetailView(model: model)
+            .environment(AppearanceStore(preference: .light))
             .frame(width: 1_440, height: 1_024)
             .environment(\.colorScheme, .light)
             .environment(\.controlActiveState, .key)
@@ -114,6 +115,91 @@ import Testing
     }
 
     window.close()
+}
+
+@Test @MainActor func riskFilterStaysLeftAlignedWithCandidateList() async throws {
+    let model = AppModel(
+        dependencies: .fixture(
+            report: UITestFixtures.scanReport(candidateCount: 6, failureCount: 0)
+        )
+    )
+    await model.scan()
+
+    let hosting = NSHostingView(
+        rootView: DetailView(model: model)
+            .environment(AppearanceStore(preference: .light))
+            .frame(width: 1_100, height: 937)
+    )
+    hosting.frame = NSRect(x: 0, y: 0, width: 1_100, height: 937)
+    let window = NSWindow(
+        contentRect: hosting.frame,
+        styleMask: [.borderless],
+        backing: .buffered,
+        defer: false
+    )
+    window.contentView = hosting
+    hosting.layoutSubtreeIfNeeded()
+    await Task.yield()
+    hosting.layoutSubtreeIfNeeded()
+
+    var segmentedMinX: CGFloat?
+    var listMinX: CGFloat?
+    func walk(_ view: NSView) {
+        let frameInHosting = hosting.convert(view.bounds, from: view)
+        if view is NSSegmentedControl, segmentedMinX == nil {
+            segmentedMinX = frameInHosting.minX
+        }
+        if String(describing: type(of: view)) == "HostingScrollView", listMinX == nil {
+            listMinX = frameInHosting.minX
+        }
+        for sub in view.subviews {
+            walk(sub)
+        }
+    }
+    walk(hosting)
+
+    let segmentedLeading = try #require(segmentedMinX)
+    let listLeading = try #require(listMinX)
+
+    // The segmented risk filter must stay flush with the candidate list's
+    // leading edge (both share the 28pt horizontal padding).
+    #expect(segmentedLeading == listLeading)
+}
+
+@Test @MainActor func detailViewIdealHeightAdaptsToCandidateCount() async throws {
+    let emptyModel = AppModel(
+        dependencies: .fixture(
+            report: UITestFixtures.scanReport(candidateCount: 0, failureCount: 0)
+        )
+    )
+    await emptyModel.scan()
+
+    let populatedModel = AppModel(
+        dependencies: .fixture(
+            report: UITestFixtures.scanReport(candidateCount: 12, failureCount: 0)
+        )
+    )
+    await populatedModel.scan()
+
+    let emptyView = NSHostingView(
+        rootView: DetailView(model: emptyModel)
+            .environment(AppearanceStore(preference: .light))
+    )
+    emptyView.layoutSubtreeIfNeeded()
+    let populatedView = NSHostingView(
+        rootView: DetailView(model: populatedModel)
+            .environment(AppearanceStore(preference: .light))
+    )
+    populatedView.layoutSubtreeIfNeeded()
+
+    let emptyFitting = emptyView.fittingSize
+    let populatedFitting = populatedView.fittingSize
+
+    // The window auto-size contract: never below the 640 minimum, and taller
+    // content (more candidate rows) must grow the ideal height.
+    #expect(emptyFitting.height >= 640)
+    #expect(populatedFitting.height > emptyFitting.height)
+    #expect(populatedFitting.width == emptyFitting.width)
 }
 
 private func visualCandidate(

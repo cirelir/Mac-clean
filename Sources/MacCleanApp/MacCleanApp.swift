@@ -15,6 +15,16 @@ struct MacCleanApp: App {
             exit(0)
         }
 
+        // Unbundled executables start with the `.prohibited` activation
+        // policy, which makes the system silently refuse `NSApp.activate`:
+        // the panel still works, but the details window can never be
+        // brought to the front. Make the app an activatable menu bar
+        // utility (no Dock icon) so its windows can come forward.
+        // `NSApplication.shared` (not `NSApp`) must be used here: during
+        // `App.init()` the global `NSApp` is still nil, and touching it
+        // crashes with an implicitly-unwrapped-optional fatal error.
+        NSApplication.shared.setActivationPolicy(.accessory)
+
         let model: AppModel?
         let failure: String?
         do {
