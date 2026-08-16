@@ -146,7 +146,12 @@ import Testing
     var listMinX: CGFloat?
     func walk(_ view: NSView) {
         let frameInHosting = hosting.convert(view.bounds, from: view)
-        if view is NSSegmentedControl, segmentedMinX == nil {
+        // The window now also hosts the top-level view tab picker (2 segments);
+        // the risk filter is the 4-segment control that must stay flush with
+        // the candidate list's leading edge.
+        if let control = view as? NSSegmentedControl,
+           segmentedMinX == nil,
+           control.segmentCount == 4 {
             segmentedMinX = frameInHosting.minX
         }
         if String(describing: type(of: view)) == "HostingScrollView", listMinX == nil {

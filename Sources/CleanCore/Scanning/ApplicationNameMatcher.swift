@@ -46,7 +46,9 @@ struct ApplicationNameMatcher {
 
     static func normalize(_ value: String) -> String {
         value.lowercased().replacingOccurrences(
-            of: "[^a-z0-9\\u{4e00}-\\u{9fff}]",
+            // ICU (NSRegularExpression) does not support the \u{hhhh} brace
+            // escape; use the standard \uhhhh form for the CJK range.
+            of: "[^a-z0-9\\u4e00-\\u9fff]",
             with: "",
             options: .regularExpression
         )

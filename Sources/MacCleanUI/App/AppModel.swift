@@ -17,6 +17,8 @@ public struct AppDependencies {
     public let coordinator: any ScanCoordinating
     public let planner: CleanupPlanner
     public let cleanupExecutor: any CleanupExecuting
+    public let uninstaller: any AppUninstalling
+    public let quitter: any ApplicationQuitting
     public let audit: any AuditStoring
     public let finder: any FinderRevealing
     public let notifications: any NotificationSending
@@ -27,6 +29,8 @@ public struct AppDependencies {
         coordinator: any ScanCoordinating,
         planner: CleanupPlanner,
         cleanupExecutor: any CleanupExecuting,
+        uninstaller: any AppUninstalling,
+        quitter: any ApplicationQuitting,
         audit: any AuditStoring,
         finder: any FinderRevealing,
         notifications: any NotificationSending,
@@ -36,6 +40,8 @@ public struct AppDependencies {
         self.coordinator = coordinator
         self.planner = planner
         self.cleanupExecutor = cleanupExecutor
+        self.uninstaller = uninstaller
+        self.quitter = quitter
         self.audit = audit
         self.finder = finder
         self.notifications = notifications
@@ -54,6 +60,10 @@ public final class AppModel {
         case idle, scanning, results, cleaning
     }
 
+    public enum UninstallPhase: Equatable {
+        case idle, loadingApps, ready, buildingPlan, uninstalling
+    }
+
     public struct State {
         public var phase: Phase = .idle
         public var candidates: [CleanupCandidate] = []
@@ -61,6 +71,14 @@ public final class AppModel {
         public var lastScan: Date?
         public var errorMessage: String?
         public var lastCleanupOutcomes: [String] = []
+
+        public var uninstallPhase: UninstallPhase = .idle
+        public var uninstallableApplications: [InstalledApplication] = []
+        public var runningBundleIDs: Set<String> = []
+        public var selectedUninstallApplication: InstalledApplication?
+        public var uninstallPlan: AppUninstallPlan?
+        public var uninstallOutcomes: [String] = []
+        public var uninstallErrorMessage: String?
 
         public init() {}
     }
@@ -358,6 +376,125 @@ public final class AppModel {
             return
         }
         dependencies.finder.reveal([url])
+    }
+
+    // MARK: - Application uninstall
+
+    /// Only /System bundles (SIP-protected) can never be uninstalled. Apple's
+    /// user-installable apps in /Applications — Xcode, Final Cut, Pages, ... —
+    /// are listable, as are third-party input methods under /Library/Input
+    /// Methods.
+    public func isUninstallable(_ application: InstalledApplication) -> Bool {
+        !application.url.path.hasPrefix("/System/")
+    }
+
+    public func isRunning(_ application: InstalledApplication) -> Bool {
+        state.runningBundleIDs.contains(application.bundleID)
+    }
+
+    /// Loads the list of uninstallable installed applications together with
+    /// the currently running bundle IDs, so the UI can disable running apps.
+    public func loadUninstallableApplications() async {
+        guard
+            state.uninstallPhase != .uninstalling,
+            state.uninstallPhase != .buildingPlan
+        else { return }
+
+        state.uninstallPhase = .loadingApps
+        state.uninstallErrorMessage = nil
+        do {
+            let inventory = try await dependencies.inventory.inventory()
+            let applications = inventory.installedApplications
+                .filter { isUninstallable($0) }
+                .sorted { $0.name.localizedStandardCompare($1.name) == .orderedAscending }
+            state.uninstallableApplications = applications
+            state.runningBundleIDs = inventory.runningBundleIDs
+            state.uninstallPhase = .ready
+        } catch {
+            state.uninstallErrorMessage = String(describing: error)
+            state.uninstallPhase = .ready
+        }
+    }
+
+    /// Builds the uninstall plan (app bundle + matched data items) for the
+    /// selected application. Failures — e.g. the app is running — surface in
+    /// the uninstallErrorMessage state.
+    public func buildUninstallPlan(for application: InstalledApplication) async {
+        guard state.uninstallPhase != .uninstalling else { return }
+        state.selectedUninstallApplication = application
+        state.uninstallPlan = nil
+        state.uninstallOutcomes = []
+        state.uninstallErrorMessage = nil
+        state.uninstallPhase = .buildingPlan
+        do {
+            let plan = try await dependencies.uninstaller.plan(for: application)
+            state.uninstallPlan = plan
+            state.uninstallPhase = .ready
+        } catch {
+            state.uninstallErrorMessage = String(describing: error)
+            state.uninstallPhase = .ready
+        }
+    }
+
+    /// Moves the confirmed plan items into the trash, then refreshes the
+    /// application list (the uninstalled app disappears from the inventory).
+    public func uninstall(itemIDs: Set<UUID>) async {
+        guard
+            state.uninstallPhase == .ready,
+            let plan = state.uninstallPlan,
+            !itemIDs.isEmpty
+        else { return }
+
+        let items = plan.items.filter { itemIDs.contains($0.id) }
+        guard !items.isEmpty else { return }
+        let filteredPlan = AppUninstallPlan(
+            id: plan.id,
+            application: plan.application,
+            items: items
+        )
+
+        state.uninstallPhase = .uninstalling
+        state.uninstallOutcomes = []
+        state.uninstallErrorMessage = nil
+
+        // A running application is quit (gracefully) before anything moves;
+        // the plan is kept so the user can retry after quitting manually.
+        if state.runningBundleIDs.contains(plan.application.bundleID) {
+            let quitSucceeded = await dependencies.quitter.quit(plan.application)
+            guard quitSucceeded else {
+                state.uninstallErrorMessage = plan.application.name
+                    + " 正在运行且未能自动退出，请手动退出后重试。"
+                state.uninstallPhase = .ready
+                return
+            }
+        }
+
+        do {
+            let result = try await dependencies.uninstaller.execute(filteredPlan)
+            let itemByID = Dictionary(
+                uniqueKeysWithValues: plan.items.map { ($0.id, $0) }
+            )
+            state.uninstallOutcomes = result.items.compactMap { item in
+                guard let uninstallItem = itemByID[item.itemID] else { return nil }
+                switch item.status {
+                case .success:
+                    return uninstallItem.displayName + "：已移入废纸篓"
+                case .partial(_, let message):
+                    return uninstallItem.displayName + "：部分完成（" + message + "）"
+                case .skipped(let reason):
+                    return uninstallItem.displayName + "：跳过（" + skipReasonText(reason) + "）"
+                case .failed(let message):
+                    return uninstallItem.displayName + "：失败（" + message + "）"
+                }
+            }
+        } catch {
+            state.uninstallErrorMessage = String(describing: error)
+        }
+
+        state.uninstallPhase = .ready
+        state.uninstallPlan = nil
+        state.selectedUninstallApplication = nil
+        await loadUninstallableApplications()
     }
 
     private func cleanupProtocolMismatch(

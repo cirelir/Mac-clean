@@ -65,8 +65,11 @@ struct DescriptorTreeCleaner {
         }
     }
 
-    /// Moves the whole validated root directory into the trash with a single
-    /// descriptor-relative rename, preserving the original object for recovery.
+    /// Moves the whole validated root directory (or a single regular file,
+    /// e.g. a preferences plist) into the trash, preserving the original
+    /// object for recovery. The move is descriptor-relative: the root object
+    /// is opened with O_NOFOLLOW and its identity is re-checked against the
+    /// parent entry before the system trash API or a renameat fallback.
     func moveToTrash(
         at rootURL: URL,
         expectedFingerprint: FileFingerprint,
@@ -74,7 +77,7 @@ struct DescriptorTreeCleaner {
     ) -> DescriptorCleanupOutcome {
         let rootDescriptor: Int32
         do {
-            rootDescriptor = try openCanonicalDirectory(at: rootURL)
+            rootDescriptor = try openCanonicalObject(at: rootURL)
         } catch DescriptorCleanupError.pathRejected {
             return .skipped(.pathRejected)
         } catch DescriptorCleanupError.posix(_, _, let code) where code == ENOENT {
@@ -251,6 +254,56 @@ struct DescriptorTreeCleaner {
             )
         }
         return descriptor
+    }
+
+    /// Opens a canonical directory or a single regular file for a
+    /// move-to-trash operation. Directories are opened with O_DIRECTORY;
+    /// regular files (preferences plists, cookie files, ...) fall back to a
+    /// plain O_RDONLY | O_NOFOLLOW open. Anything else (symlinks, aliases,
+    /// sockets, devices) is rejected, so a replaced root can never redirect
+    /// the trash move elsewhere.
+    private func openCanonicalObject(at url: URL) throws -> Int32 {
+        let directoryDescriptor = Darwin.open(
+            url.path,
+            O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW
+        )
+        if directoryDescriptor >= 0 {
+            return directoryDescriptor
+        }
+        if errno == ELOOP {
+            throw DescriptorCleanupError.pathRejected
+        }
+
+        let fileDescriptor = Darwin.open(
+            url.path,
+            O_RDONLY | O_CLOEXEC | O_NOFOLLOW
+        )
+        guard fileDescriptor >= 0 else {
+            if errno == ELOOP {
+                throw DescriptorCleanupError.pathRejected
+            }
+            throw DescriptorCleanupError.posix(
+                operation: "open canonical root",
+                path: url.path,
+                code: errno
+            )
+        }
+
+        var status = stat()
+        guard Darwin.fstat(fileDescriptor, &status) == 0 else {
+            let code = errno
+            Darwin.close(fileDescriptor)
+            throw DescriptorCleanupError.posix(
+                operation: "fstat canonical root",
+                path: url.path,
+                code: code
+            )
+        }
+        guard status.st_mode & S_IFMT == S_IFREG else {
+            Darwin.close(fileDescriptor)
+            throw DescriptorCleanupError.pathRejected
+        }
+        return fileDescriptor
     }
 
     private func removeContents(

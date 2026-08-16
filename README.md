@@ -23,6 +23,7 @@ Mac Clean 是一个面向 **macOS 14+** 的菜单栏应用，帮助你在不承�
   - **系统数据**：`~/Library/Logs` 中与已安装应用同名的旧日志目录、`DiagnosticReports` 崩溃报告 → 绿色
   - **开发数据**：`~/Library/Developer/Xcode/DerivedData` 构建产物（Xcode 未运行时）→ 绿色
   - **应用支持**：`~/Library/Application Support` 中已卸载应用的残留数据 → 黄色"待确认"
+- **一键卸载应用**：详情页「卸载应用」标签，从应用清单选择已安装应用后，列出应用本体与 `~/Library` 下的匹配数据目录（Application Support / Caches / Preferences / HTTPStorages / WebKit / Saved Application State / Containers / Group Containers / Application Scripts / LaunchAgents / Developer），默认全选、可全选/取消全选，逐项勾选后一键移入废纸篓；搜索框右侧有刷新按钮，可随时重新加载应用清单；**正在运行的应用可在确认后自动退出再卸载**（仅优雅退出，绝不强制结束）；只有 `/System` 下系统应用不可卸载
 - **风险分级**：绿色（可安全清理）、黄色（待确认，需手动勾选）、红色（只报告）。系统容器（`com.apple.*`）、正在运行应用的缓存**永不推荐清理**。
 - **安全清理**：清理前重新核对应用清单，候选应用已启动则跳过；所有清理移入**废纸篓**而非直接删除。
 - **Finder 定位**：每个候选项可根据当前文件状态在 Finder 中定位。
@@ -75,7 +76,8 @@ hdiutil create -volname "Mac Clean" -srcfolder <staging> -ov -format UDZO MacCle
 2. **左键点击**图标打开扫描面板 → 点击"扫描"。
 3. 面板按风险分组展示候选项：绿色可直接"清理安全缓存"；黄色"待确认"项在**详情页**勾选后随"清理所选"一并移入废纸篓。
 4. 每个候选展示原始/规范化路径、扫描器、规则、所有者、风险原因与计划动作；文件仍存在时可"在 Finder 中显示"。
-5. **右键**（或 Control-点击）图标 → "退出 Mac Clean"。
+5. 详情页切换到**「卸载应用」**：左侧选择要卸载的应用，右侧勾选应用本体与各数据项，点击"移入废纸篓并卸载"；若应用正在运行，按钮变为"退出并卸载"，确认后先优雅退出应用再移入废纸篓（退出失败会提示手动退出后重试）。所有项目移入废纸篓，可随时恢复。
+6. **右键**（或 Control-点击）图标 → "退出 Mac Clean"。
 
 ## 🛡️ 安全模型
 
@@ -87,6 +89,7 @@ hdiutil create -volname "Mac Clean" -srcfolder <staging> -ov -format UDZO MacCle
 - 绿色候选必须**明确匹配到已安装且未运行的 Bundle ID**；唯一的无主绿色例外是崩溃报告（纯诊断产物）。
 - 清理动作只允许**清空已验证候选目录的内容并保留根目录**；所有删除移入废纸篓。
 - 清理前重新读取运行应用清单；清单读取失败则整次 fail closed。
+- 卸载使用**独立的验证器与执行器**，覆盖范围固定为用户 `~/Library` 数据根与应用所在目录（含 `/Applications`、`~/Applications`、`/Library/Input Methods`、`~/Library/Developer`）；匹配先按 Bundle ID / 显示名**规范化后完全相等**，再补充**单向包含匹配**：数据目录是应用名核心词（≥3 字符，如 `Google` 之于 Google Chrome、`Code` 之于 Visual Studio Code）或嵌入完整规范化 Bundle ID（如 `com.google.Chrome.ShipIt`、微信的 `com.tencent.xinWeChat.WeChatFileProviderExtension` 扩展容器）；组容器兼容 `group.` 与团队 ID 两种前缀（如 `5A4RE8SF68.com.tencent.xinWeChat`）；反向包含（如 `Pro` 匹配到 `Profiles`）一律不允许；只有 `/System` 下的 SIP 保护系统应用不可卸载，Apple 用户安装应用（Xcode、Final Cut、Pages 等，Bundle ID 为 `com.apple.*` 但位于 `/Applications`）与 `/Library/Input Methods` 第三方输入法均可卸载；**运行中的应用在确认后先优雅退出再卸载**（`NSRunningApplication.terminate` + 有界等待，绝不强制结束；退出失败则中止并提示手动退出）；执行器卸载前重新核对运行清单，进程未退出则拒绝执行；单个数据目录大小统计失败或超大超时**不会中止整个计划**（该项保留、大小记为 0，删除动作本身不依赖大小）；运行中应用的数据目录按对象身份（device + inode）校验，不会被 mtime 变化误跳过；所有项目只**移入废纸篓**、绝不做永久删除。
 
 完整边界、信任规则、竞态限制与当前不具备的权限，见 [docs/security-model.md](docs/security-model.md)。
 
@@ -98,6 +101,7 @@ Sources/
 │   ├── Models/       # CleanupCandidate / ApplicationInventory
 │   ├── Scanning/     # 四个扫描器 + ScanCoordinator + 应用清单
 │   ├── Cleanup/      # CleanupPlanner / CleanupExecutor / 描述符树清理
+│   ├── Uninstall/    # AppUninstaller 应用卸载（计划 + 移入废纸篓）
 │   ├── Risk/         # RiskClassifier 风险分级
 │   ├── Paths/        # SafePathValidator / FileFingerprinting
 │   └── Audit/        # AuditRecord 审计记录
@@ -124,7 +128,7 @@ docs/
 swift test
 ```
 
-测试覆盖：各扫描器的匹配与排除规则、路径验证器、风险分级、清理计划与执行器、应用清单、Finder 定位、SwiftData 审计存储、每周补扫调度与视图呈现。
+测试覆盖：各扫描器的匹配与排除规则、路径验证器、风险分级、清理计划与执行器、应用卸载计划与执行、应用清单、Finder 定位、SwiftData 审计存储、每周补扫调度与视图呈现。
 
 ## 🗺️ 路线图
 

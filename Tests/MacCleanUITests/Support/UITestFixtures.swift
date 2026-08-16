@@ -153,6 +153,54 @@ final class RecordingScanCoordinator: ScanCoordinating {
     }
 }
 
+actor StubUninstaller: AppUninstalling {
+    private let planResult: Result<AppUninstallPlan, UITestFixtureError>
+    private let executeResult: Result<UninstallResult, UITestFixtureError>
+    private(set) var executeCount = 0
+
+    init(
+        plan: Result<AppUninstallPlan, UITestFixtureError> = .success(
+            AppUninstallPlan(
+                application: InstalledApplication(
+                    name: "Editor",
+                    bundleID: "com.example.Editor",
+                    url: URL(fileURLWithPath: "/tmp/mac-clean-tests/Editor.app")
+                ),
+                items: []
+            )
+        ),
+        execute: Result<UninstallResult, UITestFixtureError> = .success(
+            UninstallResult(planID: UUID(), items: [])
+        )
+    ) {
+        planResult = plan
+        executeResult = execute
+    }
+
+    func plan(for application: InstalledApplication) async throws -> AppUninstallPlan {
+        try planResult.get()
+    }
+
+    func execute(_ plan: AppUninstallPlan) async throws -> UninstallResult {
+        executeCount += 1
+        return try executeResult.get()
+    }
+}
+
+actor StubQuitter: ApplicationQuitting {
+    private let result: Bool
+    private(set) var quitRequests: [InstalledApplication] = []
+
+    init(result: Bool = true) {
+        self.result = result
+    }
+
+    func quit(_ application: InstalledApplication) async -> Bool {
+        quitRequests.append(application)
+        return result
+    }
+}
+
 actor StubCleanupExecutor: CleanupExecuting {
     private let result: @Sendable (CleanupPlan) -> CleanupResult
     private(set) var plans: [CleanupPlan] = []
@@ -373,6 +421,8 @@ extension AppDependencies {
         inventory: (any ApplicationInventoryProviding)? = nil,
         coordinator: (any ScanCoordinating)? = nil,
         cleanupExecutor: (any CleanupExecuting)? = nil,
+        uninstaller: (any AppUninstalling)? = nil,
+        quitter: (any ApplicationQuitting)? = nil,
         audit: (any AuditStoring)? = nil,
         finder: (any FinderRevealing)? = nil,
         notifications: (any NotificationSending)? = nil
@@ -382,6 +432,8 @@ extension AppDependencies {
             coordinator: coordinator ?? StubScanCoordinator(report: report),
             planner: CleanupPlanner(),
             cleanupExecutor: cleanupExecutor ?? StubCleanupExecutor(),
+            uninstaller: uninstaller ?? StubUninstaller(),
+            quitter: quitter ?? StubQuitter(),
             audit: audit ?? InMemoryAuditStore(lastScan: lastScan),
             finder: finder ?? RecordingFinderRevealer(),
             notifications: notifications ?? RecordingNotificationService(),

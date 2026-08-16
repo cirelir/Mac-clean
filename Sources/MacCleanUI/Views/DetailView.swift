@@ -69,10 +69,24 @@ private struct CandidateSection: Identifiable {
     var id: RiskLevel { risk }
 }
 
+private enum DetailTab: String, CaseIterable, Identifiable {
+    case cleanup, uninstall
+
+    var id: Self { self }
+
+    var title: String {
+        switch self {
+        case .cleanup: "空间清理"
+        case .uninstall: "卸载应用"
+        }
+    }
+}
+
 @MainActor
 public struct DetailView: View {
     @Bindable private var model: AppModel
     @Environment(AppearanceStore.self) private var appearanceStore
+    @State private var tab: DetailTab = .cleanup
     @State private var searchText = ""
     @State private var selectedIDs: Set<UUID> = []
     @State private var riskFilter: CandidateRiskFilter = .all
@@ -83,9 +97,34 @@ public struct DetailView: View {
     }
 
     public var body: some View {
+        VStack(spacing: 0) {
+            tabPicker
+
+            Divider()
+
+            switch tab {
+            case .cleanup:
+                cleanupContent
+            case .uninstall:
+                UninstallView(model: model)
+            }
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+        .tint(.blue)
+        .frame(
+            minWidth: 920,
+            idealWidth: 1_100,
+            minHeight: 640,
+            idealHeight: tab == .uninstall ? uninstallIdealHeight : contentIdealHeight
+        )
+        .background(Color(nsColor: .windowBackgroundColor))
+        .preferredColorScheme(appearanceStore.preference.colorScheme)
+    }
+
+    private var cleanupContent: some View {
         let sections = candidateSections
 
-        VStack(spacing: 0) {
+        return VStack(spacing: 0) {
             header
 
             filterBar
@@ -101,7 +140,6 @@ public struct DetailView: View {
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
-        .tint(.blue)
         .safeAreaInset(edge: .bottom, spacing: 0) {
             cleanupBar
         }
@@ -112,14 +150,23 @@ public struct DetailView: View {
         .task(id: candidateIDs) {
             await resolveApplicationIcons()
         }
-        .frame(
-            minWidth: 920,
-            idealWidth: 1_100,
-            minHeight: 640,
-            idealHeight: contentIdealHeight
-        )
-        .background(Color(nsColor: .windowBackgroundColor))
-        .preferredColorScheme(appearanceStore.preference.colorScheme)
+    }
+
+    private var tabPicker: some View {
+        Picker("视图", selection: $tab) {
+            ForEach(DetailTab.allCases) { tab in
+                Text(tab.title).tag(tab)
+            }
+        }
+        .pickerStyle(.segmented)
+        .labelsHidden()
+        .frame(width: 300)
+        .padding(.vertical, 14)
+        .accessibilityLabel("视图")
+    }
+
+    private var uninstallIdealHeight: CGFloat {
+        720
     }
 
     private var header: some View {

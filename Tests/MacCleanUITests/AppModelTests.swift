@@ -469,3 +469,327 @@ private func malformedCleanupResult(
     #expect(model.greenSummary == "2 项")
     #expect(model.yellowSummary == "1 项")
 }
+// MARK: - Application uninstall
+
+@Test @MainActor func loadUninstallableApplicationsFiltersSystemApplications() async {
+    let editor = InstalledApplication(
+        name: "Editor",
+        bundleID: "com.example.Editor",
+        url: URL(fileURLWithPath: "/Applications/Editor.app")
+    )
+    let systemApp = InstalledApplication(
+        name: "Finder",
+        bundleID: "com.apple.finder",
+        url: URL(fileURLWithPath: "/System/Applications/Finder.app")
+    )
+    let libraryApp = InstalledApplication(
+        name: "Input Helper",
+        bundleID: "com.example.input",
+        url: URL(fileURLWithPath: "/Library/Input Methods/Input.app")
+    )
+    let inventory = ApplicationInventory(
+        installedApplications: [editor, systemApp, libraryApp],
+        runningBundleIDs: ["com.example.Editor"]
+    )
+    let model = AppModel(
+        dependencies: .fixture(inventory: StubInventoryProvider(inventory: inventory))
+    )
+
+    await model.loadUninstallableApplications()
+
+    // Third-party input methods under /Library are user-installed and stay
+    // uninstallable; only /System bundles and Apple bundle IDs are excluded.
+    #expect(model.state.uninstallableApplications == [editor, libraryApp])
+    #expect(model.state.runningBundleIDs == ["com.example.Editor"])
+    #expect(model.state.uninstallPhase == .ready)
+    #expect(model.isUninstallable(editor))
+    #expect(!model.isUninstallable(systemApp))
+    #expect(model.isUninstallable(libraryApp))
+    #expect(model.isRunning(editor))
+}
+
+@Test @MainActor func buildUninstallPlanPublishesPlan() async {
+    let app = InstalledApplication(
+        name: "Editor",
+        bundleID: "com.example.Editor",
+        url: URL(fileURLWithPath: "/Applications/Editor.app")
+    )
+    let plan = AppUninstallPlan(application: app, items: [])
+    let model = AppModel(
+        dependencies: .fixture(
+            uninstaller: StubUninstaller(plan: .success(plan))
+        )
+    )
+
+    await model.buildUninstallPlan(for: app)
+
+    #expect(model.state.uninstallPlan == plan)
+    #expect(model.state.selectedUninstallApplication == app)
+    #expect(model.state.uninstallPhase == .ready)
+    #expect(model.state.uninstallErrorMessage == nil)
+}
+
+@Test @MainActor func buildUninstallPlanSurfacesPlanningError() async {
+    let app = InstalledApplication(
+        name: "Editor",
+        bundleID: "com.example.Editor",
+        url: URL(fileURLWithPath: "/Applications/Editor.app")
+    )
+    let model = AppModel(
+        dependencies: .fixture(
+            uninstaller: StubUninstaller(plan: .failure(.inventoryUnavailable))
+        )
+    )
+
+    await model.buildUninstallPlan(for: app)
+
+    #expect(model.state.uninstallPlan == nil)
+    #expect(model.state.uninstallErrorMessage?.contains("inventoryUnavailable") == true)
+    #expect(model.state.uninstallPhase == .ready)
+}
+
+@Test @MainActor func uninstallMovesConfirmedItemsAndRefreshesApplicationList() async {
+    let app = InstalledApplication(
+        name: "Editor",
+        bundleID: "com.example.Editor",
+        url: URL(fileURLWithPath: "/Applications/Editor.app")
+    )
+    let item = UninstallItem(
+        id: UUID(),
+        role: .appBundle,
+        url: app.url,
+        displayName: "Editor.app",
+        sizeBytes: 2_048,
+        fingerprint: FileFingerprint(
+            deviceID: 1,
+            fileID: 2,
+            ownerID: 501,
+            sizeBytes: 2_048,
+            modifiedAt: UITestFixtures.timestamp
+        )
+    )
+    let plan = AppUninstallPlan(application: app, items: [item])
+    let uninstaller = StubUninstaller(
+        plan: .success(plan),
+        execute: .success(
+            UninstallResult(
+                planID: plan.id,
+                items: [
+                    UninstallItemResult(
+                        itemID: item.id,
+                        status: .success(estimatedDeletedBytes: 2_048)
+                    )
+                ]
+            )
+        )
+    )
+    let inventory = SequencedInventoryProvider(
+        results: [
+            .success(ApplicationInventory(installedApplications: [app], runningBundleIDs: [])),
+            .success(ApplicationInventory(installedApplications: [], runningBundleIDs: []))
+        ]
+    )
+    let model = AppModel(
+        dependencies: .fixture(
+            inventory: inventory,
+            uninstaller: uninstaller
+        )
+    )
+    await model.loadUninstallableApplications()
+    await model.buildUninstallPlan(for: app)
+
+    await model.uninstall(itemIDs: [item.id])
+
+    #expect(model.state.uninstallOutcomes == ["Editor.app：已移入废纸篓"])
+    #expect(model.state.uninstallPlan == nil)
+    #expect(model.state.selectedUninstallApplication == nil)
+    #expect(model.state.uninstallPhase == .ready)
+    #expect(model.state.uninstallableApplications.isEmpty)
+}
+
+@Test @MainActor func uninstallIgnoresEmptySelectionAndKeepsThePlan() async {
+    let app = InstalledApplication(
+        name: "Editor",
+        bundleID: "com.example.Editor",
+        url: URL(fileURLWithPath: "/Applications/Editor.app")
+    )
+    let plan = AppUninstallPlan(application: app, items: [])
+    let model = AppModel(
+        dependencies: .fixture(
+            uninstaller: StubUninstaller(plan: .success(plan))
+        )
+    )
+    await model.buildUninstallPlan(for: app)
+
+    await model.uninstall(itemIDs: [])
+
+    #expect(model.state.uninstallPlan == plan)
+    #expect(model.state.uninstallPhase == .ready)
+    #expect(model.state.uninstallOutcomes.isEmpty)
+}
+@Test @MainActor func uninstallQuitsRunningApplicationBeforeExecuting() async {
+    let app = InstalledApplication(
+        name: "Editor",
+        bundleID: "com.example.Editor",
+        url: URL(fileURLWithPath: "/Applications/Editor.app")
+    )
+    let item = UninstallItem(
+        id: UUID(),
+        role: .appBundle,
+        url: app.url,
+        displayName: "Editor.app",
+        sizeBytes: 2_048,
+        fingerprint: FileFingerprint(
+            deviceID: 1,
+            fileID: 2,
+            ownerID: 501,
+            sizeBytes: 2_048,
+            modifiedAt: UITestFixtures.timestamp
+        )
+    )
+    let plan = AppUninstallPlan(application: app, items: [item])
+    let uninstaller = StubUninstaller(
+        plan: .success(plan),
+        execute: .success(
+            UninstallResult(
+                planID: plan.id,
+                items: [
+                    UninstallItemResult(
+                        itemID: item.id,
+                        status: .success(estimatedDeletedBytes: 2_048)
+                    )
+                ]
+            )
+        )
+    )
+    let quitter = StubQuitter(result: true)
+    let inventory = StubInventoryProvider(
+        inventory: ApplicationInventory(
+            installedApplications: [app],
+            runningBundleIDs: ["com.example.Editor"]
+        )
+    )
+    let model = AppModel(
+        dependencies: .fixture(
+            inventory: inventory,
+            uninstaller: uninstaller,
+            quitter: quitter
+        )
+    )
+    await model.loadUninstallableApplications()
+    await model.buildUninstallPlan(for: app)
+
+    await model.uninstall(itemIDs: [item.id])
+
+    #expect(await quitter.quitRequests == [app])
+    #expect(await uninstaller.executeCount == 1)
+    #expect(model.state.uninstallOutcomes == ["Editor.app：已移入废纸篓"])
+    #expect(model.state.uninstallPlan == nil)
+}
+
+@Test @MainActor func uninstallKeepsPlanAndReportsErrorWhenQuitFails() async {
+    let app = InstalledApplication(
+        name: "Editor",
+        bundleID: "com.example.Editor",
+        url: URL(fileURLWithPath: "/Applications/Editor.app")
+    )
+    let item = UninstallItem(
+        id: UUID(),
+        role: .appBundle,
+        url: app.url,
+        displayName: "Editor.app",
+        sizeBytes: 2_048,
+        fingerprint: FileFingerprint(
+            deviceID: 1,
+            fileID: 2,
+            ownerID: 501,
+            sizeBytes: 2_048,
+            modifiedAt: UITestFixtures.timestamp
+        )
+    )
+    let plan = AppUninstallPlan(application: app, items: [item])
+    let uninstaller = StubUninstaller(plan: .success(plan))
+    let quitter = StubQuitter(result: false)
+    let inventory = StubInventoryProvider(
+        inventory: ApplicationInventory(
+            installedApplications: [app],
+            runningBundleIDs: ["com.example.Editor"]
+        )
+    )
+    let model = AppModel(
+        dependencies: .fixture(
+            inventory: inventory,
+            uninstaller: uninstaller,
+            quitter: quitter
+        )
+    )
+    await model.loadUninstallableApplications()
+    await model.buildUninstallPlan(for: app)
+
+    await model.uninstall(itemIDs: [item.id])
+
+    #expect(await quitter.quitRequests == [app])
+    #expect(await uninstaller.executeCount == 0)
+    #expect(model.state.uninstallPlan == plan) // kept for a manual retry
+    #expect(model.state.uninstallErrorMessage?.contains("正在运行") == true)
+    #expect(model.state.uninstallOutcomes.isEmpty)
+}
+
+@Test @MainActor func uninstallSkipsQuitWhenApplicationIsNotRunning() async {
+    let app = InstalledApplication(
+        name: "Editor",
+        bundleID: "com.example.Editor",
+        url: URL(fileURLWithPath: "/Applications/Editor.app")
+    )
+    let item = UninstallItem(
+        id: UUID(),
+        role: .appBundle,
+        url: app.url,
+        displayName: "Editor.app",
+        sizeBytes: 2_048,
+        fingerprint: FileFingerprint(
+            deviceID: 1,
+            fileID: 2,
+            ownerID: 501,
+            sizeBytes: 2_048,
+            modifiedAt: UITestFixtures.timestamp
+        )
+    )
+    let plan = AppUninstallPlan(application: app, items: [item])
+    let uninstaller = StubUninstaller(
+        plan: .success(plan),
+        execute: .success(
+            UninstallResult(
+                planID: plan.id,
+                items: [
+                    UninstallItemResult(
+                        itemID: item.id,
+                        status: .success(estimatedDeletedBytes: 2_048)
+                    )
+                ]
+            )
+        )
+    )
+    let quitter = StubQuitter()
+    let inventory = StubInventoryProvider(
+        inventory: ApplicationInventory(
+            installedApplications: [app],
+            runningBundleIDs: []
+        )
+    )
+    let model = AppModel(
+        dependencies: .fixture(
+            inventory: inventory,
+            uninstaller: uninstaller,
+            quitter: quitter
+        )
+    )
+    await model.loadUninstallableApplications()
+    await model.buildUninstallPlan(for: app)
+
+    await model.uninstall(itemIDs: [item.id])
+
+    #expect(await quitter.quitRequests.isEmpty)
+    #expect(await uninstaller.executeCount == 1)
+    #expect(model.state.uninstallOutcomes == ["Editor.app：已移入废纸篓"])
+}

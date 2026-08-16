@@ -51,6 +51,69 @@ public enum LiveDependencies {
                 applicationSupportRoot
             ]
         )
+        // The uninstaller deliberately works over a wider set of user Library
+        // data roots (preferences, containers, saved state, ...) than the
+        // scanning validator. It uses its own validator so the scan-time
+        // security boundary is not widened.
+        let libraryRoot = homeDirectory
+            .appending(path: "Library", directoryHint: .isDirectory)
+            .standardizedFileURL
+        let preferencesRoot = libraryRoot
+            .appending(path: "Preferences", directoryHint: .isDirectory)
+            .standardizedFileURL
+        let httpStoragesRoot = libraryRoot
+            .appending(path: "HTTPStorages", directoryHint: .isDirectory)
+            .standardizedFileURL
+        let webKitRoot = libraryRoot
+            .appending(path: "WebKit", directoryHint: .isDirectory)
+            .standardizedFileURL
+        let savedStateRoot = libraryRoot
+            .appending(path: "Saved Application State", directoryHint: .isDirectory)
+            .standardizedFileURL
+        let containersRoot = libraryRoot
+            .appending(path: "Containers", directoryHint: .isDirectory)
+            .standardizedFileURL
+        let groupContainersRoot = libraryRoot
+            .appending(path: "Group Containers", directoryHint: .isDirectory)
+            .standardizedFileURL
+        let applicationScriptsRoot = libraryRoot
+            .appending(path: "Application Scripts", directoryHint: .isDirectory)
+            .standardizedFileURL
+        let launchAgentsRoot = libraryRoot
+            .appending(path: "LaunchAgents", directoryHint: .isDirectory)
+            .standardizedFileURL
+        let applicationsRoot = URL(fileURLWithPath: "/Applications", isDirectory: true)
+        let userApplicationsRoot = homeDirectory
+            .appending(path: "Applications", directoryHint: .isDirectory)
+            .standardizedFileURL
+        let inputMethodsRoot = URL(
+            fileURLWithPath: "/Library/Input Methods",
+            isDirectory: true
+        )
+        let uninstallRoots = [
+            applicationSupportRoot,
+            cacheRoot,
+            logsRoot,
+            preferencesRoot,
+            httpStoragesRoot,
+            webKitRoot,
+            savedStateRoot,
+            containersRoot,
+            groupContainersRoot,
+            applicationScriptsRoot,
+            launchAgentsRoot,
+            developerRoot,
+            applicationsRoot,
+            userApplicationsRoot,
+            inputMethodsRoot
+        ]
+        let uninstallValidator = SafePathValidator(
+            allowedRoots: uninstallRoots,
+            forbiddenExactPaths: Set(
+                [URL(fileURLWithPath: "/", isDirectory: true), homeDirectory]
+                    + uninstallRoots
+            )
+        )
         let fingerprinter = SystemFileFingerprinter()
         let cacheScanner = ApplicationCacheScanner(
             cacheRoot: cacheRoot,
@@ -97,6 +160,12 @@ public enum LiveDependencies {
             ),
             planner: CleanupPlanner(),
             cleanupExecutor: CleanupExecutor(validator: validator),
+            uninstaller: SystemAppUninstaller(
+                libraryRoot: libraryRoot,
+                inventory: inventory,
+                executor: CleanupExecutor(validator: uninstallValidator)
+            ),
+            quitter: NSWorkspaceApplicationQuitter(),
             audit: try SwiftDataAuditStore(),
             finder: NSWorkspaceFinderRevealer(),
             notifications: UserNotificationService(),
