@@ -13,8 +13,14 @@ swift build -c release --product MacCleanApp --disable-sandbox
 
 TEMPLATE_DMG="MacClean-0.1.0.dmg"
 TEMPLATE_APP="dist/MacClean.app"
+ICON_ASSET="$ROOT/Assets/AppIcon.icns"
 STAGING="$(mktemp -d)"
 trap 'rm -rf "$STAGING"' EXIT
+
+if [ ! -f "$ICON_ASSET" ]; then
+    echo "缺少 App 图标资源: $ICON_ASSET" >&2
+    exit 1
+fi
 
 # 1. 准备 .app 模板：优先复用已组装的 dist/MacClean.app，否则从旧 DMG 提取。
 if [ ! -d "$TEMPLATE_APP" ]; then
@@ -30,7 +36,10 @@ echo "==> 替换二进制并更新版本号"
 cp .build/release/MacCleanApp "$TEMPLATE_APP/Contents/MacOS/MacCleanApp"
 chmod +x "$TEMPLATE_APP/Contents/MacOS/MacCleanApp"
 rm -rf "$TEMPLATE_APP/Contents/_CodeSignature"
+mkdir -p "$TEMPLATE_APP/Contents/Resources"
+cp "$ICON_ASSET" "$TEMPLATE_APP/Contents/Resources/AppIcon.icns"
 /usr/libexec/PlistBuddy \
+    -c "Set :CFBundleIconFile AppIcon" \
     -c "Set :CFBundleShortVersionString $VERSION" \
     -c "Set :CFBundleVersion 2" \
     "$TEMPLATE_APP/Contents/Info.plist"

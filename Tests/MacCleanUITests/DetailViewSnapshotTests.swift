@@ -82,6 +82,7 @@ import Testing
     let hostingView = NSHostingView(
         rootView: DetailView(model: model)
             .environment(AppearanceStore(preference: .light))
+            .environment(AppSettingsStore())
             .frame(width: 1_440, height: 1_024)
             .environment(\.colorScheme, .light)
             .environment(\.controlActiveState, .key)
@@ -128,6 +129,7 @@ import Testing
     let hosting = NSHostingView(
         rootView: DetailView(model: model)
             .environment(AppearanceStore(preference: .light))
+            .environment(AppSettingsStore())
             .frame(width: 1_100, height: 937)
     )
     hosting.frame = NSRect(x: 0, y: 0, width: 1_100, height: 937)
@@ -189,11 +191,13 @@ import Testing
     let emptyView = NSHostingView(
         rootView: DetailView(model: emptyModel)
             .environment(AppearanceStore(preference: .light))
+            .environment(AppSettingsStore())
     )
     emptyView.layoutSubtreeIfNeeded()
     let populatedView = NSHostingView(
         rootView: DetailView(model: populatedModel)
             .environment(AppearanceStore(preference: .light))
+            .environment(AppSettingsStore())
     )
     populatedView.layoutSubtreeIfNeeded()
 

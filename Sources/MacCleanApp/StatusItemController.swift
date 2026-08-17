@@ -5,8 +5,9 @@ import SwiftUI
 
 /// Owns the menu bar status item.
 ///
-/// - Left click: toggles the compact panel (NSPopover hosting MenuBarRootView).
-/// - Right click (or control-click): pops up a small menu with "退出 Mac Clean".
+/// - Left click: opens the main interface (the details window).
+/// - Right click (or control-click): pops up a menu with "打开主界面",
+///   "快速面板" and "退出 Mac Clean".
 ///
 /// The details window is also owned here (hosted outside the SwiftUI scene
 /// hierarchy, where `openWindow` is not available) and is opened through the
@@ -17,7 +18,9 @@ final class StatusItemController: NSObject {
     private let popover: NSPopover
     private let model: AppModel?
     private let initializationFailure: String?
-    private let appearanceStore = AppearanceStore()
+    private let appearanceStore = AppearanceStore.shared
+    private let settingsStore = AppSettingsStore.shared
+    private let updateChecker = UpdateChecker()
     private var detailsWindow: NSWindow?
 
     init(model: AppModel?, initializationFailure: String?) {
@@ -31,10 +34,11 @@ final class StatusItemController: NSObject {
         configureStatusItem()
         configurePopover()
         observeActivationRequests()
+        scheduleAutomaticUpdateCheck()
     }
 
     /// When a second launch attempt is made, the losing process asks this
-    /// (already running) instance to bring its panel to the front.
+    /// (already running) instance to bring its main window to the front.
     private func observeActivationRequests() {
         DistributedNotificationCenter.default().addObserver(
             self,
@@ -47,7 +51,7 @@ final class StatusItemController: NSObject {
     @objc
     private func handleActivateNotification(_ notification: Notification) {
         Task { @MainActor in
-            self.showPanel()
+            self.openDetails()
         }
     }
 
@@ -74,15 +78,36 @@ final class StatusItemController: NSObject {
         let isRightClick = event.type == .rightMouseUp
             || (event.type == .leftMouseUp && event.modifierFlags.contains(.control))
         if isRightClick {
-            showQuitMenu()
+            showStatusMenu()
         } else {
-            togglePanel()
+            openDetails()
         }
     }
 
-    private func showQuitMenu() {
+    /// Main entry point is the details window; the quick panel stays
+    /// reachable through the right-click menu for fast scan access.
+    private func showStatusMenu() {
         guard let button = statusItem.button else { return }
         let menu = NSMenu()
+
+        let openItem = NSMenuItem(
+            title: "打开主界面",
+            action: #selector(openMainWindow(_:)),
+            keyEquivalent: ""
+        )
+        openItem.target = self
+        menu.addItem(openItem)
+
+        let panelItem = NSMenuItem(
+            title: "快速面板",
+            action: #selector(showQuickPanel(_:)),
+            keyEquivalent: ""
+        )
+        panelItem.target = self
+        menu.addItem(panelItem)
+
+        menu.addItem(.separator())
+
         let quitItem = NSMenuItem(
             title: "退出 Mac Clean",
             action: #selector(quit(_:)),
@@ -97,12 +122,14 @@ final class StatusItemController: NSObject {
         )
     }
 
-    private func togglePanel() {
-        if popover.isShown {
-            popover.performClose(nil)
-        } else {
-            showPanel()
-        }
+    @objc
+    private func openMainWindow(_ sender: Any?) {
+        openDetails()
+    }
+
+    @objc
+    private func showQuickPanel(_ sender: Any?) {
+        showPanel()
     }
 
     private func showPanel() {
@@ -119,6 +146,7 @@ final class StatusItemController: NSObject {
             return NSHostingController(
                 rootView: MenuBarRootView(model: model)
                     .environment(appearanceStore)
+                    .environment(settingsStore)
                     .environment(
                         \.openDetailsWindow,
                         { [weak self] in
@@ -166,6 +194,7 @@ final class StatusItemController: NSObject {
             window.contentViewController = NSHostingController(
                 rootView: DetailView(model: model)
                     .environment(appearanceStore)
+                    .environment(settingsStore)
             )
             detailsWindow = window
             fitWindowToContent(window)
@@ -177,7 +206,7 @@ final class StatusItemController: NSObject {
         // current content (e.g. a candidate list grown by a recent scan).
         fitWindowToContent(window)
 
-        NSRunningApplication.current.activate(options: [.activateAllWindows])
+        NSApp.activate(ignoringOtherApps: true)
         if window.isMiniaturized {
             window.deminiaturize(nil)
         }
@@ -257,6 +286,45 @@ final class StatusItemController: NSObject {
                 self?.refitDetailsWindowIfVisible()
                 self?.observeDetailsContentForResizing()
             }
+        }
+    }
+
+    // MARK: - Update checks
+
+    /// Checks GitHub Releases shortly after launch and presents an alert
+    /// when a newer version is available. A version that was already
+    /// prompted once is not prompted again, so the user is not nagged
+    /// on every launch.
+    private func scheduleAutomaticUpdateCheck() {
+        Task { @MainActor in
+            try? await Task.sleep(for: .seconds(3))
+            await checkForUpdates()
+        }
+    }
+
+    private func checkForUpdates() async {
+        let result = await updateChecker.checkLatestVersion()
+        guard case .updateAvailable(let version, let releaseURL) = result else {
+            return
+        }
+        let defaultsKey = "MacClean.lastAutoPromptedVersion"
+        if UserDefaults.standard.string(forKey: defaultsKey) == version {
+            return
+        }
+        UserDefaults.standard.set(version, forKey: defaultsKey)
+        presentUpdateAlert(version: version, releaseURL: releaseURL)
+    }
+
+    private func presentUpdateAlert(version: String, releaseURL: URL) {
+        NSApp.activate(ignoringOtherApps: true)
+        let alert = NSAlert()
+        alert.messageText = "发现新版本 \(version)"
+        alert.informativeText = "Mac Clean \(version) 已发布，当前版本是 \(AppVersion.current)。要前往下载吗？"
+        alert.alertStyle = .informational
+        alert.addButton(withTitle: "前往下载")
+        alert.addButton(withTitle: "稍后")
+        if alert.runModal() == .alertFirstButtonReturn {
+            NSWorkspace.shared.open(releaseURL)
         }
     }
 }

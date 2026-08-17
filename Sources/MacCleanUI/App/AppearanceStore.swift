@@ -43,6 +43,10 @@ public enum AppearancePreference: String, CaseIterable, Identifiable, Sendable {
 @MainActor
 @Observable
 public final class AppearanceStore {
+    /// Shared app-wide instance; the Settings window and every hosted
+    /// view observe the same object so changes propagate immediately.
+    @MainActor public static let shared = AppearanceStore()
+
     public static let defaultsKey = "macclean.appearancePreference"
 
     public var preference: AppearancePreference {

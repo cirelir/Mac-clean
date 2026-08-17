@@ -45,9 +45,14 @@ struct MacCleanApp: App {
 
     var body: some Scene {
         // The status item, the panel, and the details window are all owned by
-        // StatusItemController; this placeholder scene keeps the SwiftUI app
-        // running without opening any window at launch.
-        Settings { EmptyView() }
+        // StatusItemController. The Settings scene provides the native
+        // preferences window (app menu -> Settings..., Cmd+,) with the
+        // shared app-wide stores so changes apply everywhere instantly.
+        Settings {
+            SettingsView()
+                .environment(AppearanceStore.shared)
+                .environment(AppSettingsStore.shared)
+        }
     }
 }
 

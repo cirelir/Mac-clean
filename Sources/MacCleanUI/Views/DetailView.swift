@@ -86,11 +86,13 @@ private enum DetailTab: String, CaseIterable, Identifiable {
 public struct DetailView: View {
     @Bindable private var model: AppModel
     @Environment(AppearanceStore.self) private var appearanceStore
+    @Environment(AppSettingsStore.self) private var settingsStore
     @State private var tab: DetailTab = .cleanup
     @State private var searchText = ""
     @State private var selectedIDs: Set<UUID> = []
     @State private var riskFilter: CandidateRiskFilter = .all
     @State private var applicationIcons: [UUID: NSImage] = [:]
+    @State private var expandedSections: Set<RiskLevel> = Set(RiskLevel.allCases)
 
     public init(model: AppModel) {
         self.model = model
@@ -170,8 +172,8 @@ public struct DetailView: View {
     }
 
     private var header: some View {
-        VStack(alignment: .leading, spacing: 38) {
-            HStack(alignment: .center, spacing: 24) {
+        VStack(alignment: .leading, spacing: 24) {
+            HStack(alignment: .center, spacing: 12) {
                 VStack(alignment: .leading, spacing: 8) {
                     HStack(alignment: .firstTextBaseline, spacing: 10) {
                         Text("可释放")
@@ -189,7 +191,7 @@ public struct DetailView: View {
                         .foregroundStyle(.secondary)
                 }
 
-                Spacer(minLength: 24)
+                Spacer(minLength: 12)
 
                 Button {
                     Task { await model.scan() }
@@ -199,7 +201,6 @@ public struct DetailView: View {
                 }
                 .buttonStyle(.bordered)
                 .controlSize(.large)
-                .frame(width: 148)
                 .disabled(isBusy)
                 .help("重新扫描；关闭本窗口不会中断扫描进程")
 
@@ -211,9 +212,17 @@ public struct DetailView: View {
                 }
                 .buttonStyle(.borderedProminent)
                 .controlSize(.large)
-                .frame(width: 196)
                 .disabled(isBusy || greenCandidates.isEmpty)
                 .accessibilityHint("仅清理绿色安全缓存。")
+
+                SettingsLink {
+                    Label("设置", systemImage: "gearshape")
+                        .font(.body.weight(.medium))
+                }
+                .buttonStyle(.bordered)
+                .controlSize(.large)
+                .help("打开设置")
+                .accessibilityLabel("设置")
             }
 
             summaryStrip
@@ -322,8 +331,12 @@ public struct DetailView: View {
 
     private var filterBar: some View {
         HStack(spacing: 18) {
+            let availableFilters = settingsStore.showRedItems
+                ? CandidateRiskFilter.allCases
+                : CandidateRiskFilter.allCases.filter { $0 != .red }
+
             Picker("风险筛选", selection: $riskFilter) {
-                ForEach(CandidateRiskFilter.allCases) { filter in
+                ForEach(availableFilters) { filter in
                     Text(filter.title).tag(filter)
                 }
             }
@@ -335,6 +348,13 @@ public struct DetailView: View {
             .labelsHidden()
             .accessibilityLabel("风险筛选")
             .frame(width: 520, alignment: .leading)
+            // Reset filter to .all when red items are hidden and the current
+            // filter targets the red risk level.
+            .onChange(of: settingsStore.showRedItems) { _, showRed in
+                if !showRed, riskFilter == .red {
+                    riskFilter = .all
+                }
+            }
 
             Spacer(minLength: 24)
 
@@ -373,6 +393,8 @@ public struct DetailView: View {
 
             Divider()
 
+            selectAllBar
+
             candidateList(sections)
                 .frame(
                     idealHeight: candidateListIdealHeight(sections),
@@ -410,30 +432,91 @@ public struct DetailView: View {
         .frame(maxWidth: .infinity)
     }
 
+    private var selectAllBar: some View {
+        let yellowIDs = visibleYellowIDs
+        let hasYellow = !yellowIDs.isEmpty
+        let selected = selectedIDs.intersection(yellowIDs)
+        let isAllSelected = hasYellow && selected.count == yellowIDs.count
+        let isMixed = !selected.isEmpty && selected.count < yellowIDs.count
+        let selectedCount = selected.count
+        let totalCount = yellowIDs.count
+
+        return HStack(spacing: 12) {
+            Toggle("全选", isOn: Binding(
+                get: { isAllSelected },
+                set: { isSelected in
+                    if isSelected {
+                        selectedIDs.formUnion(yellowIDs)
+                    } else {
+                        selectedIDs.subtract(yellowIDs)
+                    }
+                }
+            ))
+            .toggleStyle(.checkbox)
+            .font(.system(size: 12))
+            .disabled(!hasYellow)
+            .accessibilityHint("勾选或取消勾选列表中全部待确认项目")
+
+            if hasYellow, isMixed {
+                Text("部分选中")
+                    .font(.system(size: 11))
+                    .foregroundStyle(.orange)
+            }
+
+            Spacer()
+
+            if hasYellow {
+                HStack(spacing: 0) {
+                    Text("已选 ")
+                    Text(String(selectedCount)).bold()
+                    Text(" / ")
+                    Text(String(totalCount))
+                    Text(" 项")
+                }
+                .font(.system(size: 11))
+                .foregroundStyle(.secondary)
+                .monospacedDigit()
+            }
+        }
+        .padding(.horizontal, 16)
+        .padding(.vertical, 7)
+        .background(Color(nsColor: .controlBackgroundColor).opacity(0.48))
+    }
+
     private func candidateList(_ sections: [CandidateSection]) -> some View {
         ScrollView {
             LazyVStack(spacing: 0, pinnedViews: [.sectionHeaders]) {
                 ForEach(sections) { section in
                     Section {
-                        ForEach(section.candidates) { candidate in
-                            CandidateRow(
-                                candidate: candidate,
-                                applicationIcon: applicationIcons[candidate.id],
-                                selection: $selectedIDs,
-                                onReveal: { model.reveal(candidate) }
-                            )
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                            .padding(.horizontal, 16)
-                            .padding(.vertical, 6)
-                            .overlay(alignment: .bottom) {
-                                Divider()
-                                    .padding(.leading, 52)
+                        if expandedSections.contains(section.risk) {
+                            ForEach(section.candidates) { candidate in
+                                CandidateRow(
+                                    candidate: candidate,
+                                    applicationIcon: applicationIcons[candidate.id],
+                                    selection: $selectedIDs,
+                                    onReveal: { model.reveal(candidate) }
+                                )
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                                .padding(.horizontal, 16)
+                                .padding(.vertical, 6)
+                                .overlay(alignment: .bottom) {
+                                    Divider()
+                                        .padding(.leading, 52)
+                                }
                             }
                         }
                     } header: {
                         RiskSectionHeader(
                             risk: section.risk,
-                            count: section.candidates.count
+                            count: section.candidates.count,
+                            isExpanded: expandedSections.contains(section.risk),
+                            onToggle: {
+                                if expandedSections.contains(section.risk) {
+                                    expandedSections.remove(section.risk)
+                                } else {
+                                    expandedSections.insert(section.risk)
+                                }
+                            }
                         )
                         .frame(maxWidth: .infinity)
                         .padding(.horizontal, 16)
@@ -459,22 +542,22 @@ public struct DetailView: View {
     /// auto-size to what is actually displayed instead of a fixed height.
     ///
     /// The values mirror the layout metrics below: header top/bottom padding
-    /// (38/22), header spacing (38), the headline row (~84), the summary strip
+    /// (38/22), header spacing (24), the headline row (~84), the summary strip
     /// (76 + 16 vertical padding = 108), filter bar (36 + 14 + 14 = 64), the
     /// divider (1), the list container chrome (33 header + 1 divider + 16
     /// bottom padding = 50), and the cleanup footer (~58).
     private var contentIdealHeight: CGFloat {
-        var headerHeight: CGFloat = 84 + 38 + 108
+        var headerHeight: CGFloat = 84 + 24 + 108
         if model.state.errorMessage != nil {
-            headerHeight += 38 + 18
+            headerHeight += 24 + 18
         }
         if !model.state.failures.isEmpty {
-            headerHeight += 38 + disclosureIdealHeight(lineCount: model.state.failures.count)
+            headerHeight += 24 + disclosureIdealHeight(lineCount: model.state.failures.count)
         }
         if !model.state.lastCleanupOutcomes.isEmpty {
-            headerHeight += 38 + disclosureIdealHeight(lineCount: model.state.lastCleanupOutcomes.count)
+            headerHeight += 24 + disclosureIdealHeight(lineCount: model.state.lastCleanupOutcomes.count)
         }
-        headerHeight += 38 + 22
+        headerHeight += 24 + 22
 
         let contentHeight = candidateSections.isEmpty
             ? 210 // empty-state placeholder (ContentUnavailableView)
@@ -584,11 +667,20 @@ public struct DetailView: View {
         let query = searchPresentation.normalizedQuery
         return model.state.candidates.filter { candidate in
             guard riskFilter.includes(candidate) else { return false }
+            if candidate.risk == .red, !settingsStore.showRedItems {
+                return false
+            }
             guard !query.isEmpty else { return true }
             return searchableValues(for: candidate).contains {
                 $0.localizedStandardContains(query)
             }
         }
+    }
+
+    /// IDs of yellow-risk candidates currently visible in the filtered list,
+    /// used by the select-all checkbox in the header.
+    private var visibleYellowIDs: Set<UUID> {
+        Set(filteredCandidates.filter { $0.risk == .yellow }.map { $0.id })
     }
 
     private var candidateSections: [CandidateSection] {
@@ -784,23 +876,36 @@ private struct RiskSummaryMetric: View {
 private struct RiskSectionHeader: View {
     let risk: RiskLevel
     let count: Int
+    let isExpanded: Bool
+    let onToggle: () -> Void
 
     var body: some View {
-        HStack(spacing: 8) {
-            Image(systemName: symbol)
-                .foregroundStyle(color)
-            Text(title)
-                .font(.system(size: 12, weight: .semibold))
-            Text("\(count) 项")
-                .font(.system(size: 12))
-                .foregroundStyle(.secondary)
-            Spacer()
-            Text(detail)
-                .font(.system(size: 12))
-                .foregroundStyle(.secondary)
+        Button {
+            onToggle()
+        } label: {
+            HStack(spacing: 8) {
+                Image(systemName: symbol)
+                    .foregroundStyle(color)
+                Text(title)
+                    .font(.system(size: 12, weight: .semibold))
+                Text("\(count) 项")
+                    .font(.system(size: 12))
+                    .foregroundStyle(.secondary)
+                Spacer()
+                Text(detail)
+                    .font(.system(size: 12))
+                    .foregroundStyle(.secondary)
+                Image(systemName: "chevron.down")
+                    .font(.system(size: 10, weight: .semibold))
+                    .foregroundStyle(.tertiary)
+                    .rotationEffect(.degrees(isExpanded ? 0 : -90))
+                    .animation(.easeInOut(duration: 0.2), value: isExpanded)
+            }
+            .textCase(nil)
+            .padding(.vertical, 5)
+            .contentShape(Rectangle())
         }
-        .textCase(nil)
-        .padding(.vertical, 5)
+        .buttonStyle(.plain)
     }
 
     private var title: String {

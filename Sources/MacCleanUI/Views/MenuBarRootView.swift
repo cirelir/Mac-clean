@@ -1,3 +1,4 @@
+import AppKit
 import Foundation
 import SwiftUI
 
@@ -132,23 +133,25 @@ public struct MenuBarRootView: View {
 
             Divider()
 
-            HStack(spacing: 8) {
-                Label("外观", systemImage: "circle.lefthalf.filled")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
+            HStack(spacing: 6) {
+                Text("Mac Clean")
+                    .font(.system(size: 11, weight: .medium))
+                    .foregroundStyle(.tertiary)
+
+                Text(AppVersion.displayString)
+                    .font(.system(size: 11))
+                    .foregroundStyle(.tertiary)
 
                 Spacer()
 
-                Picker("外观模式", selection: Bindable(appearanceStore).preference) {
-                    ForEach(AppearancePreference.allCases) { mode in
-                        Text(mode.title).tag(mode)
-                    }
+                SettingsLink {
+                    Label("设置", systemImage: "gearshape")
+                        .font(.system(size: 11))
                 }
-                .pickerStyle(.menu)
-                .labelsHidden()
-                .frame(width: 120)
-                .accessibilityLabel("外观模式")
+                .buttonStyle(.plain)
+                .help("打开设置")
             }
+            .padding(.top, 6)
         }
         .padding(18)
         .frame(width: 330)
@@ -241,3 +244,4 @@ public struct MenuBarRootView: View {
         }
     }
 }
+

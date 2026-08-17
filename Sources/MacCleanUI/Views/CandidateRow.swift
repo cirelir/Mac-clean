@@ -164,43 +164,52 @@ public struct CandidateRow: View {
     }
 
     public var body: some View {
-        DisclosureGroup(isExpanded: $isExpanded) {
-            VStack(alignment: .leading, spacing: 14) {
-                evidenceDetails
-
-                Divider()
-
-                HStack {
-                    Label(actionLabel, systemImage: actionSymbol)
-                        .font(.callout)
-                        .foregroundStyle(.secondary)
-
-                    Spacer()
-
-                    Button {
-                        onReveal()
-                    } label: {
-                        Label(presentation.finderActionTitle, systemImage: "folder")
-                    }
-                    .buttonStyle(.bordered)
-                    .disabled(!finderAvailability.isEnabled)
-                    .accessibilityLabel(presentation.finderActionTitle)
-                    .accessibilityHint(finderAvailability.accessibilityHint)
-                }
-            }
-            .padding(16)
-            .background(Color(nsColor: .controlBackgroundColor).opacity(0.72))
-            .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
-            .padding(.top, 10)
-        } label: {
+        VStack(spacing: 0) {
             rowLabel
-            .contentShape(Rectangle())
-            .accessibilityElement(children: .ignore)
-            .accessibilityLabel(candidate.displayName)
-            .accessibilityValue(
-                "\(presentation.riskLabel)，\(presentation.formattedSize)，\(ownerLabel)"
-            )
-            .accessibilityHint(isExpanded ? "折叠证据详情" : "展开证据详情")
+                .contentShape(Rectangle())
+                .onTapGesture {
+                    toggleExpanded()
+                }
+                .accessibilityElement(children: .ignore)
+                .accessibilityLabel(candidate.displayName)
+                .accessibilityValue(
+                    "\(presentation.riskLabel)，\(presentation.formattedSize)，\(ownerLabel)"
+                )
+                .accessibilityHint(isExpanded ? "折叠证据详情" : "展开证据详情")
+                .accessibilityAction {
+                    toggleExpanded()
+                }
+
+            if isExpanded {
+                VStack(alignment: .leading, spacing: 14) {
+                    evidenceDetails
+
+                    Divider()
+
+                    HStack {
+                        Label(actionLabel, systemImage: actionSymbol)
+                            .font(.callout)
+                            .foregroundStyle(.secondary)
+
+                        Spacer()
+
+                        Button {
+                            onReveal()
+                        } label: {
+                            Label(presentation.finderActionTitle, systemImage: "folder")
+                        }
+                        .buttonStyle(.bordered)
+                        .disabled(!finderAvailability.isEnabled)
+                        .accessibilityLabel(presentation.finderActionTitle)
+                        .accessibilityHint(finderAvailability.accessibilityHint)
+                    }
+                }
+                .padding(16)
+                .background(Color(nsColor: .controlBackgroundColor).opacity(0.72))
+                .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+                .padding(.top, 10)
+                .transition(.opacity.combined(with: .move(edge: .top)))
+            }
         }
         .onChange(of: isExpanded) { _, expanded in
             if expanded {
@@ -215,8 +224,24 @@ public struct CandidateRow: View {
         .frame(maxWidth: .infinity)
     }
 
+    private func toggleExpanded() {
+        withAnimation(.easeInOut(duration: 0.2)) {
+            isExpanded.toggle()
+        }
+        if isExpanded {
+            refreshFinderAvailability()
+        }
+    }
+
     private var rowLabel: some View {
         HStack(alignment: .center, spacing: 12) {
+            Image(systemName: "chevron.down")
+                .font(.system(size: 10, weight: .semibold))
+                .foregroundStyle(.tertiary)
+                .frame(width: 14, alignment: .center)
+                .rotationEffect(.degrees(isExpanded ? 0 : -90))
+                .animation(.easeInOut(duration: 0.2), value: isExpanded)
+
             Group {
                 if candidate.risk == .yellow {
                     Toggle("", isOn: selectionBinding)
